@@ -49,16 +49,21 @@ func Render(w io.Writer, res *simulate.Result, format Format, verbose bool) erro
 func renderJSON(w io.Writer, res *simulate.Result) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(res)
+	if err := enc.Encode(res); err != nil {
+		return fmt.Errorf("writing JSON output: %w", err)
+	}
+	return nil
 }
 
 func renderYAML(w io.Writer, res *simulate.Result) error {
 	b, err := yaml.Marshal(res)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshaling YAML output: %w", err)
 	}
-	_, err = w.Write(b)
-	return err
+	if _, err := w.Write(b); err != nil {
+		return fmt.Errorf("writing YAML output: %w", err)
+	}
+	return nil
 }
 
 func renderTable(w io.Writer, res *simulate.Result, verbose bool) error {

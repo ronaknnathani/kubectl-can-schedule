@@ -63,7 +63,11 @@ func runSim(t *testing.T, objs []runtime.Object, opts Options, workloads []*inpu
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return sim.Run(workloads)
+	res, err := sim.Run(workloads)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	return res
 }
 
 func TestFlagsPackingAcrossNodes(t *testing.T) {
@@ -245,6 +249,7 @@ spec:
 		}
 	}
 	parse := func(manifest string) []*input.Workload {
+		t.Helper()
 		wls, err := input.ParseFiles([]string{"-"}, "default", strings.NewReader(manifest))
 		if err != nil {
 			t.Fatalf("ParseFiles: %v", err)
@@ -281,6 +286,122 @@ func firstReasons(wl WorkloadResult) map[string]string {
 		}
 	}
 	return nil
+}
+
+func TestShortCircuitStopsAfterFirstFailure(t *testing.T) {
+	objs := []runtime.Object{newNode("node-a", "4", "8Gi")}
+	// 2 cpu per replica on a 4 cpu node => only 2 fit; ask for 5.
+	wl := input.FromFlags(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}, 5, "default", "probe")
+	res := runSim(t, objs, Options{}, []*input.Workload{wl})
+
+	if res.Workloads[0].ReplicasFit != 2 {
+		t.Fatalf("ReplicasFit = %d, want 2", res.Workloads[0].ReplicasFit)
+	}
+	// The replica list must stop at the first failure (ordinals 0,1 fit + 2 failed),
+	// not contain an entry for every requested replica.
+	if got := len(res.Workloads[0].Replicas); got != 3 {
+		t.Fatalf("len(Replicas) = %d, want 3 (short-circuit after first failure)", got)
+	}
+}
+
+func TestPreemptionEvictsMinimalVictimSet(t *testing.T) {
+	objs := []runtime.Object{
+		newNode("node-a", "10", "32Gi"),
+		newPod("small", "node-a", "1", "1Gi", 0), // lower priority, tiny
+		newPod("big", "node-a", "9", "1Gi", 1),   // lower priority, large
+		&schedulingv1.PriorityClass{ObjectMeta: metav1.ObjectMeta{Name: "high"}, Value: 1000},
+	}
+	highManifest := `
+apiVersion: v1
+kind: Pod
+metadata: {name: high, namespace: default}
+spec:
+  priorityClassName: high
+  containers:
+  - name: c
+    image: busybox
+    resources: {requests: {cpu: "9"}}
+`
+	high, err := input.ParseFiles([]string{"-"}, "default", strings.NewReader(highManifest))
+	if err != nil {
+		t.Fatalf("ParseFiles: %v", err)
+	}
+	// A follow-on, default-priority workload needing 1 cpu. It must NOT fit:
+	// minimal preemption evicts only `big` (freeing 9), leaving `small` using the
+	// last cpu. Over-eviction (evicting small too) would wrongly free room for it.
+	probe := input.FromFlags(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}, 1, "default", "probe")
+
+	res := runSim(t, objs, Options{ConsiderPreemption: true}, []*input.Workload{high[0], probe})
+	if res.Workloads[0].ReplicasFit != 1 || !res.Workloads[0].Replicas[0].ViaPreemption {
+		t.Fatalf("high: fit=%d viaPreempt=%v, want 1/true", res.Workloads[0].ReplicasFit, res.Workloads[0].Replicas[0].ViaPreemption)
+	}
+	if res.Workloads[1].ReplicasFit != 0 {
+		t.Fatalf("probe fit=%d, want 0 (minimal preemption must not over-free capacity)", res.Workloads[1].ReplicasFit)
+	}
+}
+
+func TestPreemptionDoesNotEvictSimulatedReplicas(t *testing.T) {
+	objs := []runtime.Object{
+		newNode("node-a", "4", "8Gi"),
+		&schedulingv1.PriorityClass{ObjectMeta: metav1.ObjectMeta{Name: "high"}, Value: 1000},
+	}
+	lowManifest := `
+apiVersion: v1
+kind: Pod
+metadata: {name: low, namespace: default}
+spec:
+  containers: [{name: c, image: busybox, resources: {requests: {cpu: "4"}}}]
+`
+	highManifest := `
+apiVersion: v1
+kind: Pod
+metadata: {name: high, namespace: default}
+spec:
+  priorityClassName: high
+  containers: [{name: c, image: busybox, resources: {requests: {cpu: "4"}}}]
+`
+	low, err := input.ParseFiles([]string{"-"}, "default", strings.NewReader(lowManifest))
+	if err != nil {
+		t.Fatalf("ParseFiles low: %v", err)
+	}
+	high, err := input.ParseFiles([]string{"-"}, "default", strings.NewReader(highManifest))
+	if err != nil {
+		t.Fatalf("ParseFiles high: %v", err)
+	}
+	// `low` is placed first (fills the node). `high` must NOT preempt it: a later
+	// workload may not cannibalize an earlier one already counted as schedulable.
+	res := runSim(t, objs, Options{ConsiderPreemption: true}, []*input.Workload{low[0], high[0]})
+	if res.Workloads[0].ReplicasFit != 1 {
+		t.Fatalf("low fit=%d, want 1", res.Workloads[0].ReplicasFit)
+	}
+	if res.Workloads[1].ReplicasFit != 0 {
+		t.Fatalf("high fit=%d, want 0 (must not evict a simulated replica)", res.Workloads[1].ReplicasFit)
+	}
+}
+
+func TestUnknownPriorityClassErrors(t *testing.T) {
+	manifest := `
+apiVersion: v1
+kind: Pod
+metadata: {name: p, namespace: default}
+spec:
+  priorityClassName: does-not-exist
+  containers: [{name: c, image: busybox, resources: {requests: {cpu: "1"}}}]
+`
+	wls, err := input.ParseFiles([]string{"-"}, "default", strings.NewReader(manifest))
+	if err != nil {
+		t.Fatalf("ParseFiles: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := fakeclient.NewSimpleClientset(newNode("node-a", "4", "8Gi"))
+	sim, err := New(ctx, client, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := sim.Run(wls); err == nil {
+		t.Fatal("expected error for unknown PriorityClass")
+	}
 }
 
 func TestNodeSelectorExcludesNodes(t *testing.T) {

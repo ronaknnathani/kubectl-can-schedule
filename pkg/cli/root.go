@@ -53,10 +53,18 @@ type options struct {
 
 // Execute runs the command and returns the process exit code.
 func Execute() int {
-	o := &options{
-		configFlags: genericclioptions.NewConfigFlags(true),
-		replicas:    1,
+	o := &options{replicas: 1}
+	cmd := newCommand(o)
+	if err := cmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 2
 	}
+	return o.exitCode
+}
+
+// newCommand builds the cobra command bound to the given options.
+func newCommand(o *options) *cobra.Command {
+	o.configFlags = genericclioptions.NewConfigFlags(true)
 	cmd := &cobra.Command{
 		Use:           "kubectl-can_schedule",
 		Short:         "Check whether pods/deployments/statefulsets can be scheduled in a cluster",
@@ -80,12 +88,7 @@ func Execute() int {
 	flags.BoolVar(&o.verbose, "verbose", false, "Show per-filter-plugin rejection reasons for unschedulable workloads")
 	flags.StringVar(&o.name, "name", "", "Name for the synthetic flag-based workload")
 	o.configFlags.AddFlags(flags)
-
-	if err := cmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		return 2
-	}
-	return o.exitCode
+	return cmd
 }
 
 func (o *options) run(cmd *cobra.Command) error {
@@ -143,7 +146,10 @@ func (o *options) run(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	result := sim.Run(workloads)
+	result, err := sim.Run(workloads)
+	if err != nil {
+		return err
+	}
 
 	if err := output.Render(cmd.OutOrStdout(), result, format, o.verbose); err != nil {
 		return err

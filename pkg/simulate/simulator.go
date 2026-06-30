@@ -70,6 +70,11 @@ type Simulator struct {
 	scheduledPods []*corev1.Pod
 	pvcStore      cache.Store
 
+	// simulated holds pods this run has placed (as opposed to pods already
+	// running in the cluster). Preemption must never evict these, otherwise a
+	// later workload could cannibalize an earlier one already counted as fit.
+	simulated map[*corev1.Pod]bool
+
 	priorityClasses map[string]int32
 	defaultPriority int32
 }
@@ -100,7 +105,11 @@ func New(ctx context.Context, client clientset.Interface, opts Options) (*Simula
 	// the framework registered (PV, PVC, StorageClass, CSINode, DRA, ...).
 	pvcInformer := factory.Core().V1().PersistentVolumeClaims().Informer()
 	factory.Start(ctx.Done())
-	factory.WaitForCacheSync(ctx.Done())
+	for informerType, ok := range factory.WaitForCacheSync(ctx.Done()) {
+		if !ok {
+			return nil, fmt.Errorf("informer cache failed to sync: %s", informerType)
+		}
+	}
 
 	order := make([]string, 0, len(nodes))
 	for _, n := range nodes {
@@ -122,6 +131,7 @@ func New(ctx context.Context, client clientset.Interface, opts Options) (*Simula
 		nodeOrder:       order,
 		scheduledPods:   pods,
 		pvcStore:        pvcInformer.GetStore(),
+		simulated:       map[*corev1.Pod]bool{},
 		priorityClasses: priorityClasses,
 		defaultPriority: defaultPriority,
 	}, nil
@@ -129,7 +139,7 @@ func New(ctx context.Context, client clientset.Interface, opts Options) (*Simula
 
 // Run executes the greedy cumulative packing simulation over the workloads in
 // input order and returns the aggregated result.
-func (s *Simulator) Run(workloads []*input.Workload) *Result {
+func (s *Simulator) Run(workloads []*input.Workload) (*Result, error) {
 	res := &Result{TotalNodes: len(s.nodes), AllSchedulable: true}
 
 	for _, w := range workloads {
@@ -140,35 +150,33 @@ func (s *Simulator) Run(workloads []*input.Workload) *Result {
 			Source:            w.Source,
 			ReplicasRequested: w.Replicas,
 		}
-		stopped := false
 		for i := 0; i < int(w.Replicas); i++ {
-			rr := ReplicaResult{Ordinal: i}
-			if stopped {
-				// Identical template against an unchanged-or-tighter snapshot:
-				// if an earlier replica could not be placed, neither can this one.
-				wr.Replicas = append(wr.Replicas, rr)
-				continue
-			}
 			pod, pvcs := w.Replica(i)
-			s.injectPVCs(pvcs)
-
-			node, viaPreempt, victims, reasons := s.tryPlace(pod)
-			if node != "" {
-				pod.Spec.NodeName = node
-				if len(victims) > 0 {
-					s.evict(victims)
-				}
-				s.scheduledPods = append(s.scheduledPods, pod)
-				s.refreshSnapshot()
-				rr.Fit = true
-				rr.Node = node
-				rr.ViaPreemption = viaPreempt
-				wr.ReplicasFit++
-			} else {
-				rr.Reasons = reasons
-				stopped = true
+			if err := s.injectPVCs(pvcs); err != nil {
+				return nil, err
 			}
-			wr.Replicas = append(wr.Replicas, rr)
+
+			node, viaPreempt, victims, reasons, err := s.tryPlace(pod)
+			if err != nil {
+				return nil, err
+			}
+			if node == "" {
+				// Identical template against an unchanged-or-tighter snapshot: if
+				// this replica cannot be placed, no later replica of this workload
+				// can either, so stop and leave the rest unscheduled.
+				wr.Replicas = append(wr.Replicas, ReplicaResult{Ordinal: i, Reasons: reasons})
+				break
+			}
+
+			pod.Spec.NodeName = node
+			if len(victims) > 0 {
+				s.evict(victims)
+			}
+			s.scheduledPods = append(s.scheduledPods, pod)
+			s.simulated[pod] = true
+			s.refreshSnapshot()
+			wr.Replicas = append(wr.Replicas, ReplicaResult{Ordinal: i, Fit: true, Node: node, ViaPreemption: viaPreempt})
+			wr.ReplicasFit++
 		}
 		wr.Schedulable = wr.ReplicasFit == wr.ReplicasRequested
 		if !wr.Schedulable {
@@ -176,21 +184,24 @@ func (s *Simulator) Run(workloads []*input.Workload) *Result {
 		}
 		res.Workloads = append(res.Workloads, wr)
 	}
-	return res
+	return res, nil
 }
 
 // tryPlace runs PreFilter once then Filter on each node in name order, returning
 // the first node that passes all filter plugins. If none fit and preemption is
-// enabled (and meaningful for this pod), it attempts a preemption pass.
-func (s *Simulator) tryPlace(pod *corev1.Pod) (node string, viaPreemption bool, victims []*corev1.Pod, reasons map[string]string) {
-	s.resolvePriority(pod)
+// enabled (and meaningful for this pod), it attempts a preemption pass. An error
+// is returned only for invalid input (e.g. an unknown PriorityClass).
+func (s *Simulator) tryPlace(pod *corev1.Pod) (node string, viaPreemption bool, victims []*corev1.Pod, reasons map[string]string, err error) {
+	if err := s.resolvePriority(pod); err != nil {
+		return "", false, nil, nil, err
+	}
 	state := framework.NewCycleState()
 	reasons = map[string]string{}
 
 	preRes, preStatus, _ := s.framework.RunPreFilterPlugins(s.ctx, state, pod)
 	if !preStatus.IsSuccess() {
 		reasons[preStatus.Plugin()] = preStatus.Message()
-		return "", false, nil, reasons
+		return "", false, nil, reasons, nil
 	}
 
 	nodeStatuses := framework.NewDefaultNodeToStatus()
@@ -204,7 +215,7 @@ func (s *Simulator) tryPlace(pod *corev1.Pod) (node string, viaPreemption bool, 
 		}
 		status := s.framework.RunFilterPlugins(s.ctx, state, pod, nodeInfo)
 		if status.IsSuccess() {
-			return name, false, nil, nil
+			return name, false, nil, nil, nil
 		}
 		nodeStatuses.Set(name, status)
 		reasons[status.Plugin()] = status.Message()
@@ -212,10 +223,10 @@ func (s *Simulator) tryPlace(pod *corev1.Pod) (node string, viaPreemption bool, 
 
 	if s.opts.ConsiderPreemption && s.preemptionMeaningful(pod) {
 		if node, victims := s.tryPreemption(pod, nodeStatuses); node != "" {
-			return node, true, victims, nil
+			return node, true, victims, nil, nil
 		}
 	}
-	return "", false, nil, reasons
+	return "", false, nil, reasons, nil
 }
 
 // evict removes the given pods from the scheduled set, simulating preemption.
@@ -238,10 +249,15 @@ func (s *Simulator) refreshSnapshot() {
 	s.lister.Set(s.nodes, s.scheduledPods)
 }
 
-func (s *Simulator) injectPVCs(pvcs []*corev1.PersistentVolumeClaim) {
+// injectPVCs adds synthesized PVCs (e.g. from StatefulSet volumeClaimTemplates)
+// to the PVC informer store so volume filter plugins can evaluate them.
+func (s *Simulator) injectPVCs(pvcs []*corev1.PersistentVolumeClaim) error {
 	for _, pvc := range pvcs {
-		_ = s.pvcStore.Add(pvc)
+		if err := s.pvcStore.Add(pvc); err != nil {
+			return fmt.Errorf("injecting synthetic PVC %s/%s into informer store: %w", pvc.Namespace, pvc.Name, err)
+		}
 	}
+	return nil
 }
 
 // preemptionMeaningful reports whether preemption could possibly help: it is a
@@ -253,10 +269,12 @@ func (s *Simulator) preemptionMeaningful(pod *corev1.Pod) bool {
 
 // resolvePriority fills in pod.Spec.Priority from its PriorityClassName (or the
 // global default) when it is not already set, mirroring how priority admission
-// resolves priority before scheduling.
-func (s *Simulator) resolvePriority(pod *corev1.Pod) {
+// resolves priority before scheduling. It returns an error when the pod
+// references a PriorityClass that does not exist in the cluster, which the API
+// server would itself reject.
+func (s *Simulator) resolvePriority(pod *corev1.Pod) error {
 	if pod.Spec.Priority != nil {
-		return
+		return nil
 	}
 	var prio int32
 	switch name := pod.Spec.PriorityClassName; name {
@@ -267,13 +285,14 @@ func (s *Simulator) resolvePriority(pod *corev1.Pod) {
 	case "system-node-critical":
 		prio = systemNodeCritical
 	default:
-		if v, ok := s.priorityClasses[name]; ok {
-			prio = v
-		} else {
-			prio = s.defaultPriority
+		v, ok := s.priorityClasses[name]
+		if !ok {
+			return fmt.Errorf("pod %s/%s references unknown PriorityClass %q", pod.Namespace, pod.Name, name)
 		}
+		prio = v
 	}
 	pod.Spec.Priority = &prio
+	return nil
 }
 
 func listNodes(ctx context.Context, client clientset.Interface) ([]*corev1.Node, error) {

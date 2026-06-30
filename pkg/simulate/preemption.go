@@ -38,10 +38,15 @@ func (s *Simulator) tryPreemption(pod *corev1.Pod, nodeStatuses *framework.NodeT
 
 // preemptionVictimsOnNode returns the minimal set of lower-priority pods on
 // nodeName whose removal lets pod pass all filters there, or nil if no such set
-// exists.
+// exists. Only pods already running in the cluster are eligible victims —
+// replicas this run has placed are never evicted, so a later workload cannot
+// cannibalize an earlier one that was already counted as schedulable.
 func (s *Simulator) preemptionVictimsOnNode(pod *corev1.Pod, nodeName string, podPrio int32) []*corev1.Pod {
 	var candidates []*corev1.Pod
 	for _, p := range s.scheduledPods {
+		if s.simulated[p] {
+			continue
+		}
 		if p.Spec.NodeName == nodeName && helpers.PodPriority(p) < podPrio {
 			candidates = append(candidates, p)
 		}
@@ -57,19 +62,50 @@ func (s *Simulator) preemptionVictimsOnNode(pod *corev1.Pod, nodeName string, po
 	removed := map[*corev1.Pod]bool{}
 	for i, v := range candidates {
 		removed[v] = true
-		remaining := make([]*corev1.Pod, 0, len(s.scheduledPods))
-		for _, p := range s.scheduledPods {
-			if removed[p] {
-				continue
-			}
-			remaining = append(remaining, p)
-		}
-		s.lister.Set(s.nodes, remaining)
+		s.setSnapshotWithout(removed)
 		if s.fitsOnNode(pod, nodeName) {
-			return candidates[:i+1]
+			return s.minimizeVictims(pod, nodeName, candidates[:i+1])
 		}
 	}
 	return nil
+}
+
+// minimizeVictims drops any victim that is not actually required for pod to fit
+// on nodeName, so the simulation frees only the capacity preemption truly needs
+// (avoiding over-eviction that would make later workloads look schedulable).
+func (s *Simulator) minimizeVictims(pod *corev1.Pod, nodeName string, victims []*corev1.Pod) []*corev1.Pod {
+	removed := map[*corev1.Pod]bool{}
+	for _, v := range victims {
+		removed[v] = true
+	}
+	// Try to reprieve higher-priority victims first (least desirable to evict).
+	for i := len(victims) - 1; i >= 0; i-- {
+		v := victims[i]
+		delete(removed, v)
+		s.setSnapshotWithout(removed)
+		if !s.fitsOnNode(pod, nodeName) {
+			removed[v] = true // still needed; keep evicted
+		}
+	}
+	kept := make([]*corev1.Pod, 0, len(removed))
+	for _, v := range victims {
+		if removed[v] {
+			kept = append(kept, v)
+		}
+	}
+	return kept
+}
+
+// setSnapshotWithout installs a temporary snapshot with the given pods removed.
+func (s *Simulator) setSnapshotWithout(removed map[*corev1.Pod]bool) {
+	remaining := make([]*corev1.Pod, 0, len(s.scheduledPods))
+	for _, p := range s.scheduledPods {
+		if removed[p] {
+			continue
+		}
+		remaining = append(remaining, p)
+	}
+	s.lister.Set(s.nodes, remaining)
 }
 
 // fitsOnNode runs PreFilter + Filter for pod against a single node using the

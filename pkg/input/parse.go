@@ -89,21 +89,29 @@ func workloadFromObject(obj interface{}, source, defaultNS string) (*Workload, e
 		}, nil
 	case *appsv1.Deployment:
 		ns := namespaceOr(o.Namespace, defaultNS)
+		replicas, err := replicasOf(o.Spec.Replicas)
+		if err != nil {
+			return nil, fmt.Errorf("Deployment %s: %w", nameOr(o.Name, o.GenerateName, "deployment"), err)
+		}
 		return &Workload{
 			Kind:      "Deployment",
-			Name:      o.Name,
+			Name:      nameOr(o.Name, o.GenerateName, "deployment"),
 			Namespace: ns,
-			Replicas:  replicasOr(o.Spec.Replicas),
+			Replicas:  replicas,
 			Source:    source,
 			base:      podFromTemplate(o.Spec.Template, ns),
 		}, nil
 	case *appsv1.StatefulSet:
 		ns := namespaceOr(o.Namespace, defaultNS)
+		replicas, err := replicasOf(o.Spec.Replicas)
+		if err != nil {
+			return nil, fmt.Errorf("StatefulSet %s: %w", nameOr(o.Name, o.GenerateName, "statefulset"), err)
+		}
 		return &Workload{
 			Kind:                 "StatefulSet",
-			Name:                 o.Name,
+			Name:                 nameOr(o.Name, o.GenerateName, "statefulset"),
 			Namespace:            ns,
-			Replicas:             replicasOr(o.Spec.Replicas),
+			Replicas:             replicas,
 			Source:               source,
 			base:                 podFromTemplate(o.Spec.Template, ns),
 			volumeClaimTemplates: o.Spec.VolumeClaimTemplates,
@@ -144,12 +152,12 @@ func nameOr(name, generateName, fallback string) string {
 	return fallback
 }
 
-func replicasOr(r *int32) int32 {
+func replicasOf(r *int32) (int32, error) {
 	if r == nil {
-		return 1
+		return 1, nil
 	}
 	if *r < 0 {
-		return 0
+		return 0, fmt.Errorf("spec.replicas must not be negative, got %d", *r)
 	}
-	return *r
+	return *r, nil
 }

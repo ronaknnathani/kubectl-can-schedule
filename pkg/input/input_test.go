@@ -125,13 +125,53 @@ func TestParseResourceFlags(t *testing.T) {
 		t.Errorf("gpu = %v", rl["nvidia.com/gpu"])
 	}
 
-	for _, bad := range [][]string{{"cpu"}, {"cpu="}, {"=2"}, {"cpu=notaquantity"}, {}} {
+	for _, bad := range [][]string{{"cpu"}, {"cpu="}, {"=2"}, {"cpu=notaquantity"}, {"cpu=-1"}, {}} {
 		if _, err := ParseResourceFlags(bad); err == nil {
 			t.Errorf("ParseResourceFlags(%v) expected error", bad)
 		}
 	}
 	if _, err := ParseResourceFlags([]string{"cpu=1", "cpu=2"}); err == nil {
 		t.Error("duplicate resource expected error")
+	}
+}
+
+func TestNegativeReplicasRejected(t *testing.T) {
+	manifest := `
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: web, namespace: default}
+spec:
+  replicas: -2
+  selector: {matchLabels: {app: web}}
+  template:
+    metadata: {labels: {app: web}}
+    spec:
+      containers: [{name: c, image: nginx}]
+`
+	if _, err := ParseFiles([]string{"-"}, "default", strings.NewReader(manifest)); err == nil {
+		t.Error("expected error for negative spec.replicas")
+	}
+}
+
+func TestGenerateNameResolvedForDeployment(t *testing.T) {
+	manifest := `
+apiVersion: apps/v1
+kind: Deployment
+metadata: {generateName: web-, namespace: default}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: web}}
+  template:
+    metadata: {labels: {app: web}}
+    spec:
+      containers: [{name: c, image: nginx}]
+`
+	wls, err := ParseFiles([]string{"-"}, "default", strings.NewReader(manifest))
+	if err != nil {
+		t.Fatalf("ParseFiles: %v", err)
+	}
+	if wls[0].Name == "" {
+		t.Error("Deployment workload name should be derived from generateName, got empty")
 	}
 }
 

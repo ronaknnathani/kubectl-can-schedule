@@ -1,6 +1,7 @@
 package input
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -12,27 +13,39 @@ import (
 // ParseResourceFlags converts repeatable "<name>=<quantity>" flag values into a
 // ResourceList of per-replica requests. Names may be any resource.Quantity-typed
 // resource: cpu, memory, ephemeral-storage, nvidia.com/gpu, amd.com/gpu, etc.
+// All malformed values are reported together.
 func ParseResourceFlags(pairs []string) (corev1.ResourceList, error) {
+	if len(pairs) == 0 {
+		return nil, fmt.Errorf("at least one --resource <name>=<quantity> is required for flag-based input")
+	}
 	rl := corev1.ResourceList{}
+	var errs []error
 	for _, p := range pairs {
 		key, val, ok := strings.Cut(p, "=")
 		key = strings.TrimSpace(key)
 		val = strings.TrimSpace(val)
 		if !ok || key == "" || val == "" {
-			return nil, fmt.Errorf("invalid --resource %q, expected <name>=<quantity> (e.g. cpu=2, memory=4Gi, nvidia.com/gpu=1)", p)
+			errs = append(errs, fmt.Errorf("invalid --resource %q, expected <name>=<quantity> (e.g. cpu=2, memory=4Gi, nvidia.com/gpu=1)", p))
+			continue
 		}
 		q, err := resource.ParseQuantity(val)
 		if err != nil {
-			return nil, fmt.Errorf("invalid quantity for %q: %w", key, err)
+			errs = append(errs, fmt.Errorf("invalid quantity for %q: %w", key, err))
+			continue
+		}
+		if q.Sign() < 0 {
+			errs = append(errs, fmt.Errorf("resource %q must not be negative, got %s", key, val))
+			continue
 		}
 		name := corev1.ResourceName(key)
 		if _, exists := rl[name]; exists {
-			return nil, fmt.Errorf("resource %q specified more than once", key)
+			errs = append(errs, fmt.Errorf("resource %q specified more than once", key))
+			continue
 		}
 		rl[name] = q
 	}
-	if len(rl) == 0 {
-		return nil, fmt.Errorf("at least one --resource <name>=<quantity> is required for flag-based input")
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
 	}
 	return rl, nil
 }
