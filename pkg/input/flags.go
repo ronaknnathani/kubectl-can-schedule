@@ -18,7 +18,7 @@ func ParseResourceFlags(pairs []string) (corev1.ResourceList, error) {
 	if len(pairs) == 0 {
 		return nil, fmt.Errorf("at least one --resource <name>=<quantity> is required for flag-based input")
 	}
-	rl := corev1.ResourceList{}
+	requests := corev1.ResourceList{}
 	var errs []error
 	for _, p := range pairs {
 		key, val, ok := strings.Cut(p, "=")
@@ -38,16 +38,16 @@ func ParseResourceFlags(pairs []string) (corev1.ResourceList, error) {
 			continue
 		}
 		name := corev1.ResourceName(key)
-		if _, exists := rl[name]; exists {
+		if _, exists := requests[name]; exists {
 			errs = append(errs, fmt.Errorf("resource %q specified more than once", key))
 			continue
 		}
-		rl[name] = q
+		requests[name] = q
 	}
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}
-	return rl, nil
+	return requests, nil
 }
 
 // FromFlags builds a synthetic Workload of `replicas` identical pods, each

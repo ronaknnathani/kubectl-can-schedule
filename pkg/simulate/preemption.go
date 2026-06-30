@@ -23,14 +23,14 @@ func (s *Simulator) tryPreemption(pod *corev1.Pod, nodeStatuses *framework.NodeT
 	podPrio := helpers.PodPriority(pod)
 	defer s.refreshSnapshot() // restore the real snapshot after temporary swaps
 
-	for _, name := range s.nodeOrder {
-		st := nodeStatuses.Get(name)
-		if st == nil || st.Code() != fwk.Unschedulable {
+	for _, nodeName := range s.nodeOrder {
+		status := nodeStatuses.Get(nodeName)
+		if status == nil || status.Code() != fwk.Unschedulable {
 			// Absent, success, or unresolvable (e.g. node affinity / taint): preemption cannot help.
 			continue
 		}
-		if victims := s.preemptionVictimsOnNode(pod, name, podPrio); victims != nil {
-			return name, victims
+		if victims := s.preemptionVictimsOnNode(pod, nodeName, podPrio); victims != nil {
+			return nodeName, victims
 		}
 	}
 	return "", nil
@@ -43,13 +43,17 @@ func (s *Simulator) tryPreemption(pod *corev1.Pod, nodeStatuses *framework.NodeT
 // cannibalize an earlier one that was already counted as schedulable.
 func (s *Simulator) preemptionVictimsOnNode(pod *corev1.Pod, nodeName string, podPrio int32) []*corev1.Pod {
 	var candidates []*corev1.Pod
-	for _, p := range s.scheduledPods {
-		if s.simulated[p] {
+	for _, scheduledPod := range s.scheduledPods {
+		if s.simulated[scheduledPod] {
 			continue
 		}
-		if p.Spec.NodeName == nodeName && helpers.PodPriority(p) < podPrio {
-			candidates = append(candidates, p)
+		if scheduledPod.Spec.NodeName != nodeName {
+			continue
 		}
+		if helpers.PodPriority(scheduledPod) >= podPrio {
+			continue
+		}
+		candidates = append(candidates, scheduledPod)
 	}
 	if len(candidates) == 0 {
 		return nil
@@ -60,8 +64,8 @@ func (s *Simulator) preemptionVictimsOnNode(pod *corev1.Pod, nodeName string, po
 	})
 
 	removed := map[*corev1.Pod]bool{}
-	for i, v := range candidates {
-		removed[v] = true
+	for i, victim := range candidates {
+		removed[victim] = true
 		s.setSnapshotWithout(removed)
 		if s.fitsOnNode(pod, nodeName) {
 			return s.minimizeVictims(pod, nodeName, candidates[:i+1])
@@ -75,35 +79,35 @@ func (s *Simulator) preemptionVictimsOnNode(pod *corev1.Pod, nodeName string, po
 // (avoiding over-eviction that would make later workloads look schedulable).
 func (s *Simulator) minimizeVictims(pod *corev1.Pod, nodeName string, victims []*corev1.Pod) []*corev1.Pod {
 	removed := map[*corev1.Pod]bool{}
-	for _, v := range victims {
-		removed[v] = true
+	for _, victim := range victims {
+		removed[victim] = true
 	}
 	// Try to reprieve higher-priority victims first (least desirable to evict).
 	for i := len(victims) - 1; i >= 0; i-- {
-		v := victims[i]
-		delete(removed, v)
+		victim := victims[i]
+		delete(removed, victim)
 		s.setSnapshotWithout(removed)
 		if !s.fitsOnNode(pod, nodeName) {
-			removed[v] = true // still needed; keep evicted
+			removed[victim] = true // still needed; keep evicted
 		}
 	}
-	kept := make([]*corev1.Pod, 0, len(removed))
-	for _, v := range victims {
-		if removed[v] {
-			kept = append(kept, v)
+	requiredVictims := make([]*corev1.Pod, 0, len(removed))
+	for _, victim := range victims {
+		if removed[victim] {
+			requiredVictims = append(requiredVictims, victim)
 		}
 	}
-	return kept
+	return requiredVictims
 }
 
 // setSnapshotWithout installs a temporary snapshot with the given pods removed.
 func (s *Simulator) setSnapshotWithout(removed map[*corev1.Pod]bool) {
 	remaining := make([]*corev1.Pod, 0, len(s.scheduledPods))
-	for _, p := range s.scheduledPods {
-		if removed[p] {
+	for _, scheduledPod := range s.scheduledPods {
+		if removed[scheduledPod] {
 			continue
 		}
-		remaining = append(remaining, p)
+		remaining = append(remaining, scheduledPod)
 	}
 	s.lister.Set(s.nodes, remaining)
 }

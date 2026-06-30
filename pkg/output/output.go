@@ -24,9 +24,10 @@ const (
 
 // ParseFormat validates and normalizes an output format string.
 func ParseFormat(s string) (Format, error) {
-	switch Format(s) {
+	format := Format(s)
+	switch format {
 	case FormatTable, FormatJSON, FormatYAML:
-		return Format(s), nil
+		return format, nil
 	case "":
 		return FormatTable, nil
 	default:
@@ -70,9 +71,13 @@ func renderTable(w io.Writer, res *simulate.Result, verbose bool) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "KIND\tNAMESPACE\tNAME\tREPLICAS\tFIT\tSCHEDULABLE\tSOURCE")
 	var totalReq, totalFit int32
+	schedulableWorkloads := 0
 	for _, wl := range res.Workloads {
 		totalReq += wl.ReplicasRequested
 		totalFit += wl.ReplicasFit
+		if wl.Schedulable {
+			schedulableWorkloads++
+		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
 			wl.Kind, wl.Namespace, wl.Name,
 			wl.ReplicasRequested, wl.ReplicasFit, yesNo(wl.Schedulable), wl.Source)
@@ -87,7 +92,7 @@ func renderTable(w io.Writer, res *simulate.Result, verbose bool) error {
 			totalReq, len(res.Workloads), res.TotalNodes)
 	} else {
 		fmt.Fprintf(w, "Verdict: NOT SCHEDULABLE — %d of %d replica(s) fit across %d node(s); %d of %d workload(s) fully schedulable.\n",
-			totalFit, totalReq, res.TotalNodes, countSchedulable(res), len(res.Workloads))
+			totalFit, totalReq, res.TotalNodes, schedulableWorkloads, len(res.Workloads))
 	}
 
 	if verbose {
@@ -102,8 +107,8 @@ func renderVerbose(w io.Writer, res *simulate.Result) {
 		if wl.Schedulable {
 			continue
 		}
-		reasons := firstFailureReasons(wl)
-		if len(reasons) == 0 {
+		ordinal, reasons, ok := firstFailure(wl)
+		if !ok {
 			continue
 		}
 		if !printedHeader {
@@ -111,39 +116,20 @@ func renderVerbose(w io.Writer, res *simulate.Result) {
 			printedHeader = true
 		}
 		fmt.Fprintf(w, "\n  %s/%s (%s): replica %d could not be placed on any node\n",
-			wl.Namespace, wl.Name, wl.Kind, firstFailureOrdinal(wl))
+			wl.Namespace, wl.Name, wl.Kind, ordinal)
 		for _, plugin := range sortedKeys(reasons) {
 			fmt.Fprintf(w, "    %-26s %s\n", plugin+":", reasons[plugin])
 		}
 	}
 }
 
-func firstFailureReasons(wl simulate.WorkloadResult) map[string]string {
+func firstFailure(wl simulate.WorkloadResult) (int, map[string]string, bool) {
 	for _, r := range wl.Replicas {
 		if !r.Fit && len(r.Reasons) > 0 {
-			return r.Reasons
+			return r.Ordinal, r.Reasons, true
 		}
 	}
-	return nil
-}
-
-func firstFailureOrdinal(wl simulate.WorkloadResult) int {
-	for _, r := range wl.Replicas {
-		if !r.Fit && len(r.Reasons) > 0 {
-			return r.Ordinal
-		}
-	}
-	return 0
-}
-
-func countSchedulable(res *simulate.Result) int {
-	n := 0
-	for _, wl := range res.Workloads {
-		if wl.Schedulable {
-			n++
-		}
-	}
-	return n
+	return 0, nil, false
 }
 
 func sortedKeys(m map[string]string) []string {

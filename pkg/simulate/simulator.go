@@ -140,10 +140,10 @@ func New(ctx context.Context, client clientset.Interface, opts Options) (*Simula
 // Run executes the greedy cumulative packing simulation over the workloads in
 // input order and returns the aggregated result.
 func (s *Simulator) Run(workloads []*input.Workload) (*Result, error) {
-	res := &Result{TotalNodes: len(s.nodes), AllSchedulable: true}
+	result := &Result{TotalNodes: len(s.nodes), AllSchedulable: true}
 
 	for _, w := range workloads {
-		wr := WorkloadResult{
+		workloadResult := WorkloadResult{
 			Kind:              w.Kind,
 			Name:              w.Name,
 			Namespace:         w.Namespace,
@@ -164,7 +164,7 @@ func (s *Simulator) Run(workloads []*input.Workload) (*Result, error) {
 				// Identical template against an unchanged-or-tighter snapshot: if
 				// this replica cannot be placed, no later replica of this workload
 				// can either, so stop and leave the rest unscheduled.
-				wr.Replicas = append(wr.Replicas, ReplicaResult{Ordinal: i, Reasons: reasons})
+				workloadResult.Replicas = append(workloadResult.Replicas, ReplicaResult{Ordinal: i, Reasons: reasons})
 				break
 			}
 
@@ -175,16 +175,21 @@ func (s *Simulator) Run(workloads []*input.Workload) (*Result, error) {
 			s.scheduledPods = append(s.scheduledPods, pod)
 			s.simulated[pod] = true
 			s.refreshSnapshot()
-			wr.Replicas = append(wr.Replicas, ReplicaResult{Ordinal: i, Fit: true, Node: node, ViaPreemption: viaPreempt})
-			wr.ReplicasFit++
+			workloadResult.Replicas = append(workloadResult.Replicas, ReplicaResult{
+				Ordinal:       i,
+				Fit:           true,
+				Node:          node,
+				ViaPreemption: viaPreempt,
+			})
+			workloadResult.ReplicasFit++
 		}
-		wr.Schedulable = wr.ReplicasFit == wr.ReplicasRequested
-		if !wr.Schedulable {
-			res.AllSchedulable = false
+		workloadResult.Schedulable = workloadResult.ReplicasFit == workloadResult.ReplicasRequested
+		if !workloadResult.Schedulable {
+			result.AllSchedulable = false
 		}
-		res.Workloads = append(res.Workloads, wr)
+		result.Workloads = append(result.Workloads, workloadResult)
 	}
-	return res, nil
+	return result, nil
 }
 
 // tryPlace runs PreFilter once then Filter on each node in name order, returning
@@ -339,14 +344,14 @@ func listPriorityClasses(ctx context.Context, client clientset.Interface) (map[s
 	if err != nil {
 		return nil, 0, fmt.Errorf("listing priorityclasses: %w", err)
 	}
-	m := make(map[string]int32, len(list.Items))
-	var def int32
+	priorities := make(map[string]int32, len(list.Items))
+	var defaultPriority int32
 	for i := range list.Items {
 		pc := &list.Items[i]
-		m[pc.Name] = pc.Value
+		priorities[pc.Name] = pc.Value
 		if pc.GlobalDefault {
-			def = pc.Value
+			defaultPriority = pc.Value
 		}
 	}
-	return m, def, nil
+	return priorities, defaultPriority, nil
 }

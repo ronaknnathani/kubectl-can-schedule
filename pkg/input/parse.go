@@ -19,26 +19,26 @@ import (
 // documents separated by "---". Supported kinds: Pod, Deployment, StatefulSet.
 func ParseFiles(filenames []string, defaultNamespace string, stdin io.Reader) ([]*Workload, error) {
 	var workloads []*Workload
-	for _, fn := range filenames {
+	for _, filename := range filenames {
 		var (
-			data []byte
-			err  error
-			src  = fn
+			data   []byte
+			err    error
+			source = filename
 		)
-		if fn == "-" {
+		if filename == "-" {
 			data, err = io.ReadAll(stdin)
-			src = "stdin"
+			source = "stdin"
 		} else {
-			data, err = os.ReadFile(fn)
+			data, err = os.ReadFile(filename)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", src, err)
+			return nil, fmt.Errorf("reading %s: %w", source, err)
 		}
-		ws, err := decodeDocuments(data, src, defaultNamespace)
+		fileWorkloads, err := decodeDocuments(data, source, defaultNamespace)
 		if err != nil {
 			return nil, err
 		}
-		workloads = append(workloads, ws...)
+		workloads = append(workloads, fileWorkloads...)
 	}
 	if len(workloads) == 0 {
 		return nil, fmt.Errorf("no Pod, Deployment, or StatefulSet objects found in the provided manifests")
@@ -48,7 +48,7 @@ func ParseFiles(filenames []string, defaultNamespace string, stdin io.Reader) ([
 
 func decodeDocuments(data []byte, source, defaultNS string) ([]*Workload, error) {
 	reader := utilyaml.NewYAMLReader(bufio.NewReader(bytes.NewReader(data)))
-	var out []*Workload
+	var workloads []*Workload
 	for {
 		doc, err := reader.Read()
 		if err == io.EOF {
@@ -68,20 +68,21 @@ func decodeDocuments(data []byte, source, defaultNS string) ([]*Workload, error)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %s: %w", source, gvk, err)
 		}
-		out = append(out, w)
+		workloads = append(workloads, w)
 	}
-	return out, nil
+	return workloads, nil
 }
 
 func workloadFromObject(obj interface{}, source, defaultNS string) (*Workload, error) {
 	switch o := obj.(type) {
 	case *corev1.Pod:
 		ns := namespaceOr(o.Namespace, defaultNS)
+		name := nameOr(o.Name, o.GenerateName, "pod")
 		base := o.DeepCopy()
 		base.Namespace = ns
 		return &Workload{
 			Kind:      "Pod",
-			Name:      nameOr(o.Name, o.GenerateName, "pod"),
+			Name:      name,
 			Namespace: ns,
 			Replicas:  1,
 			Source:    source,
@@ -89,13 +90,14 @@ func workloadFromObject(obj interface{}, source, defaultNS string) (*Workload, e
 		}, nil
 	case *appsv1.Deployment:
 		ns := namespaceOr(o.Namespace, defaultNS)
+		name := nameOr(o.Name, o.GenerateName, "deployment")
 		replicas, err := replicasOf(o.Spec.Replicas)
 		if err != nil {
-			return nil, fmt.Errorf("Deployment %s: %w", nameOr(o.Name, o.GenerateName, "deployment"), err)
+			return nil, fmt.Errorf("Deployment %s: %w", name, err)
 		}
 		return &Workload{
 			Kind:      "Deployment",
-			Name:      nameOr(o.Name, o.GenerateName, "deployment"),
+			Name:      name,
 			Namespace: ns,
 			Replicas:  replicas,
 			Source:    source,
@@ -103,13 +105,14 @@ func workloadFromObject(obj interface{}, source, defaultNS string) (*Workload, e
 		}, nil
 	case *appsv1.StatefulSet:
 		ns := namespaceOr(o.Namespace, defaultNS)
+		name := nameOr(o.Name, o.GenerateName, "statefulset")
 		replicas, err := replicasOf(o.Spec.Replicas)
 		if err != nil {
-			return nil, fmt.Errorf("StatefulSet %s: %w", nameOr(o.Name, o.GenerateName, "statefulset"), err)
+			return nil, fmt.Errorf("StatefulSet %s: %w", name, err)
 		}
 		return &Workload{
 			Kind:                 "StatefulSet",
-			Name:                 nameOr(o.Name, o.GenerateName, "statefulset"),
+			Name:                 name,
 			Namespace:            ns,
 			Replicas:             replicas,
 			Source:               source,
