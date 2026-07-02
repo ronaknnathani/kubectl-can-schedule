@@ -2,6 +2,8 @@ package output
 
 import (
 	"bytes"
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -64,15 +66,22 @@ func TestRenderTableVerbose(t *testing.T) {
 }
 
 func TestRenderJSON(t *testing.T) {
+	want := sampleResult()
 	var buf bytes.Buffer
-	if err := Render(&buf, sampleResult(), FormatJSON, false); err != nil {
+	if err := Render(&buf, want, FormatJSON, false); err != nil {
 		t.Fatal(err)
 	}
-	out := buf.String()
-	for _, want := range []string{`"allSchedulable": false`, `"replicasFit": 1`, `"kind": "Deployment"`} {
-		if !strings.Contains(out, want) {
-			t.Errorf("json output missing %q\n%s", want, out)
-		}
+	// The rendered JSON must round-trip back to the exact same Result, and use
+	// the documented camelCase wire keys.
+	if !strings.Contains(buf.String(), `"allSchedulable"`) {
+		t.Errorf("JSON output missing camelCase key %q\n%s", "allSchedulable", buf.String())
+	}
+	var got simulate.Result
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal rendered JSON: %v", err)
+	}
+	if !reflect.DeepEqual(&got, want) {
+		t.Errorf("round-tripped JSON mismatch:\n got=%+v\nwant=%+v", got, *want)
 	}
 }
 

@@ -2,6 +2,7 @@
 package output
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -68,7 +69,10 @@ func renderYAML(w io.Writer, res *simulate.Result) error {
 }
 
 func renderTable(w io.Writer, res *simulate.Result, verbose bool) error {
-	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	// Render into an in-memory buffer (whose writes cannot fail) so the single
+	// real I/O write to w is the only place we need to check for an error.
+	var buf bytes.Buffer
+	tw := tabwriter.NewWriter(&buf, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "KIND\tNAMESPACE\tNAME\tREPLICAS\tFIT\tSCHEDULABLE\tSOURCE")
 	var totalReq, totalFit int32
 	schedulableWorkloads := 0
@@ -82,26 +86,30 @@ func renderTable(w io.Writer, res *simulate.Result, verbose bool) error {
 			wl.Kind, wl.Namespace, wl.Name,
 			wl.ReplicasRequested, wl.ReplicasFit, yesNo(wl.Schedulable), wl.Source)
 	}
-	if err := tw.Flush(); err != nil {
-		return err
-	}
+	tw.Flush()
 
-	fmt.Fprintln(w)
+	fmt.Fprintln(&buf)
 	if res.AllSchedulable {
-		fmt.Fprintf(w, "Verdict: SCHEDULABLE — all %d replica(s) across %d workload(s) fit on %d node(s).\n",
+		fmt.Fprintf(&buf, "Verdict: SCHEDULABLE — all %d replica(s) across %d workload(s) fit on %d node(s).\n",
 			totalReq, len(res.Workloads), res.TotalNodes)
 	} else {
-		fmt.Fprintf(w, "Verdict: NOT SCHEDULABLE — %d of %d replica(s) fit across %d node(s); %d of %d workload(s) fully schedulable.\n",
+		fmt.Fprintf(&buf, "Verdict: NOT SCHEDULABLE — %d of %d replica(s) fit across %d node(s); %d of %d workload(s) fully schedulable.\n",
 			totalFit, totalReq, res.TotalNodes, schedulableWorkloads, len(res.Workloads))
 	}
 
 	if verbose {
-		renderVerbose(w, res)
+		renderVerbose(&buf, res)
+	}
+
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		return fmt.Errorf("writing table output: %w", err)
 	}
 	return nil
 }
 
-func renderVerbose(w io.Writer, res *simulate.Result) {
+// renderVerbose appends per-plugin rejection reasons for unschedulable workloads
+// to buf, which is an in-memory buffer whose writes cannot fail.
+func renderVerbose(buf *bytes.Buffer, res *simulate.Result) {
 	printedHeader := false
 	for _, wl := range res.Workloads {
 		if wl.Schedulable {
@@ -112,13 +120,13 @@ func renderVerbose(w io.Writer, res *simulate.Result) {
 			continue
 		}
 		if !printedHeader {
-			fmt.Fprintln(w, "\nRejection reasons (per filter plugin, first unschedulable replica):")
+			fmt.Fprintln(buf, "\nRejection reasons (per filter plugin, first unschedulable replica):")
 			printedHeader = true
 		}
-		fmt.Fprintf(w, "\n  %s/%s (%s): replica %d could not be placed on any node\n",
+		fmt.Fprintf(buf, "\n  %s/%s (%s): replica %d could not be placed on any node\n",
 			wl.Namespace, wl.Name, wl.Kind, ordinal)
 		for _, plugin := range sortedKeys(reasons) {
-			fmt.Fprintf(w, "    %-26s %s\n", plugin+":", reasons[plugin])
+			fmt.Fprintf(buf, "    %-26s %s\n", plugin+":", reasons[plugin])
 		}
 	}
 }

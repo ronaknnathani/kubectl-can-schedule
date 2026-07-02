@@ -10,6 +10,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/kubernetes/scheme"
 )
@@ -73,7 +74,7 @@ func decodeDocuments(data []byte, source, defaultNS string) ([]*Workload, error)
 	return workloads, nil
 }
 
-func workloadFromObject(obj interface{}, source, defaultNS string) (*Workload, error) {
+func workloadFromObject(obj runtime.Object, source, defaultNS string) (*Workload, error) {
 	switch o := obj.(type) {
 	case *corev1.Pod:
 		ns := namespaceOr(o.Namespace, defaultNS)

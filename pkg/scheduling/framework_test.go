@@ -5,11 +5,11 @@ import (
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
-	"k8s.io/kubernetes/pkg/scheduler/framework"
 	fakeclient "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 
 	"github.com/ronaknnathani/kubectl-can-schedule/pkg/snapshot"
 )
@@ -78,10 +78,11 @@ func TestBuildDefaultFrameworkAndFilter(t *testing.T) {
 	bigPod.Name = "big"
 	bigPod.Spec.Containers[0].Resources.Requests[v1.ResourceCPU] = resource.MustParse("100")
 	state2 := framework.NewCycleState()
-	if _, s, _ := f.RunPreFilterPlugins(ctx, state2, bigPod); s.IsSuccess() {
-		status2 := f.RunFilterPlugins(ctx, state2, bigPod, nodeInfo)
-		if status2.IsSuccess() {
-			t.Fatalf("expected big pod NOT to fit on node1")
-		}
+	_, bigPreStatus, _ := f.RunPreFilterPlugins(ctx, state2, bigPod)
+	if !bigPreStatus.IsSuccess() {
+		t.Fatalf("big pod prefilter failed: %v", bigPreStatus.AsError())
+	}
+	if f.RunFilterPlugins(ctx, state2, bigPod, nodeInfo).IsSuccess() {
+		t.Fatalf("expected big pod (requests 100 cpu) NOT to fit on node1")
 	}
 }

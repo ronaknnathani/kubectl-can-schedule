@@ -4,6 +4,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -40,13 +41,13 @@ same capacity, in input order. Exit code is non-zero unless every replica fits.`
 type options struct {
 	configFlags *genericclioptions.ConfigFlags
 
-	filenames   []string
-	resources   []string
-	replicas    int32
-	preemption  bool
-	outputFmt   string
-	verbose     bool
-	name        string
+	filenames  []string
+	resources  []string
+	replicas   int32
+	preemption bool
+	outputFmt  string
+	verbose    bool
+	name       string
 
 	exitCode int
 }
@@ -96,16 +97,8 @@ func (o *options) run(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-
-	useFiles := len(o.filenames) > 0
-	useFlags := len(o.resources) > 0
-	switch {
-	case useFiles && useFlags:
-		return fmt.Errorf("-f/--filename and --resource are mutually exclusive")
-	case !useFiles && !useFlags:
-		return fmt.Errorf("provide either -f/--filename (manifests) or --resource (synthetic workload)")
-	case useFiles && cmd.Flags().Changed("replicas"):
-		return fmt.Errorf("--replicas is not valid with -f; each manifest uses its own replica count")
+	if err := o.validateFlags(cmd); err != nil {
+		return err
 	}
 
 	restConfig, err := o.configFlags.ToRESTConfig()
@@ -116,29 +109,15 @@ func (o *options) run(cmd *cobra.Command) error {
 	if err != nil {
 		return fmt.Errorf("resolving namespace: %w", err)
 	}
-
-	var workloads []*input.Workload
-	if useFiles {
-		workloads, err = input.ParseFiles(o.filenames, namespace, cmd.InOrStdin())
-		if err != nil {
-			return err
-		}
-	} else {
-		if o.replicas < 1 {
-			return fmt.Errorf("--replicas must be >= 1")
-		}
-		requests, err := input.ParseResourceFlags(o.resources)
-		if err != nil {
-			return err
-		}
-		workloads = []*input.Workload{input.FromFlags(requests, o.replicas, namespace, o.name)}
+	workloads, err := o.buildWorkloads(namespace, cmd.InOrStdin())
+	if err != nil {
+		return err
 	}
 
 	client, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return fmt.Errorf("building Kubernetes client: %w", err)
 	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -150,7 +129,6 @@ func (o *options) run(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-
 	if err := output.Render(cmd.OutOrStdout(), result, format, o.verbose); err != nil {
 		return err
 	}
@@ -158,4 +136,36 @@ func (o *options) run(cmd *cobra.Command) error {
 		o.exitCode = 1
 	}
 	return nil
+}
+
+// validateFlags enforces that exactly one input source is given and that
+// --replicas is not combined with manifest files.
+func (o *options) validateFlags(cmd *cobra.Command) error {
+	useFiles := len(o.filenames) > 0
+	useFlags := len(o.resources) > 0
+	switch {
+	case useFiles && useFlags:
+		return fmt.Errorf("-f/--filename and --resource are mutually exclusive")
+	case !useFiles && !useFlags:
+		return fmt.Errorf("provide either -f/--filename (manifests) or --resource (synthetic workload)")
+	case useFiles && cmd.Flags().Changed("replicas"):
+		return fmt.Errorf("--replicas is not valid with -f; each manifest uses its own replica count")
+	}
+	return nil
+}
+
+// buildWorkloads assembles the workloads to check from either manifest files or
+// the synthetic --resource flags. validateFlags must have passed first.
+func (o *options) buildWorkloads(namespace string, stdin io.Reader) ([]*input.Workload, error) {
+	if len(o.filenames) > 0 {
+		return input.ParseFiles(o.filenames, namespace, stdin)
+	}
+	if o.replicas < 1 {
+		return nil, fmt.Errorf("--replicas must be >= 1")
+	}
+	requests, err := input.ParseResourceFlags(o.resources)
+	if err != nil {
+		return nil, err
+	}
+	return []*input.Workload{input.FromFlags(requests, o.replicas, namespace, o.name)}, nil
 }
