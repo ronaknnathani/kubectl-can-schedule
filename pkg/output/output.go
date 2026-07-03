@@ -89,11 +89,11 @@ func renderCapacityTable(buf *bytes.Buffer, resources []resourceCapacity) {
 
 func renderWorkloadsTable(buf *bytes.Buffer, res *simulate.Result, resources []resourceCapacity, p painter) {
 	fmt.Fprintln(buf, "\nWorkloads:")
-	header := []string{"KIND", "NAME", "FEASIBLE"}
+	header := []string{"KIND", "NAME", "FEASIBLE NODES"}
 	for _, r := range resources {
 		header = append(header, string(r.name))
 	}
-	header = append(header, "FIT", "REASON")
+	header = append(header, "REPLICAS FIT", "REASON")
 
 	table := newTable(buf)
 	table.Header(header)

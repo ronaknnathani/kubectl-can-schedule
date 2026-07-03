@@ -23,13 +23,13 @@ Cluster capacity:
 ╰────────────────┴─────────────┴────────────╯
 
 Workloads:
-╭─────────────┬──────────┬──────────┬────────┬────────────┬────────────────┬─────┬────────────────────────╮
-│    KIND     │   NAME   │ FEASIBLE │  cpu   │   memory   │ nvidia.com/gpu │ FIT │         REASON         │
-├─────────────┼──────────┼──────────┼────────┼────────────┼────────────────┼─────┼────────────────────────┤
-│ Deployment  │ frontend │ 3/4      │ 2 (3%) │ 512Mi (2%) │ -              │ 2/2 │ -                      │
-│ StatefulSet │ cache    │ 3/4      │ 2 (3%) │ 1Gi (3%)   │ -              │ 2/2 │ -                      │
-│ Pod         │ trainer  │ 0/4      │ 2 (3%) │ -          │ 2              │ 0/1 │ missing nvidia.com/gpu │
-╰─────────────┴──────────┴──────────┴────────┴────────────┴────────────────┴─────┴────────────────────────╯
+╭─────────────┬──────────┬────────────────┬────────┬────────────┬────────────────┬──────────────┬────────────────────────╮
+│    KIND     │   NAME   │ FEASIBLE NODES │  cpu   │   memory   │ nvidia.com/gpu │ REPLICAS FIT │         REASON         │
+├─────────────┼──────────┼────────────────┼────────┼────────────┼────────────────┼──────────────┼────────────────────────┤
+│ Deployment  │ frontend │ 3/4            │ 2 (3%) │ 512Mi (2%) │ -              │ 2/2          │ -                      │
+│ StatefulSet │ cache    │ 3/4            │ 2 (3%) │ 1Gi (3%)   │ -              │ 2/2          │ -                      │
+│ Pod         │ trainer  │ 0/4            │ 2 (3%) │ -          │ 2              │ 0/1          │ missing nvidia.com/gpu │
+╰─────────────┴──────────┴────────────────┴────────┴────────────┴────────────────┴──────────────┴────────────────────────╯
 
 Overall: NOT SCHEDULABLE — at least one workload does not fit.
 ```
@@ -37,12 +37,12 @@ Overall: NOT SCHEDULABLE — at least one workload does not fit.
 The **cluster capacity** table (shown once) reports, per requested resource,
 total `ALLOCATABLE` and how much is already `ALLOCATED` with its percentage. The
 **workloads** table has one row per input object: its `KIND` and `NAME`, how many
-nodes a single replica passes all filters on (`FEASIBLE`), the amount each
-resource `REQUESTED` (as a percentage of allocatable), the fit ratio (`FIT` =
-placed/requested), and a concise `REASON` when it does not fully fit. Requested
-cells and the `FIT` ratio are color-coded (pastel green/amber/red) on a terminal
-— green fits, amber is partial or insufficient, red does not fit or is absent. A
-single `Overall` verdict closes the report.
+nodes a single replica passes all filters on (`FEASIBLE NODES`), the amount each
+resource `REQUESTED` (as a percentage of allocatable), the fit ratio
+(`REPLICAS FIT` = placed/requested), and a concise `REASON` when it does not
+fully fit. Requested cells and the fit ratio are color-coded (pastel
+green/amber/red) on a terminal — green fits, amber is partial or insufficient,
+red does not fit or is absent. A single `Overall` verdict closes the report.
 
 ## How it works
 
