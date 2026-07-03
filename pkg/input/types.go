@@ -33,15 +33,6 @@ type Workload struct {
 	volumeClaimTemplates []corev1.PersistentVolumeClaim
 }
 
-// Label is a concise identifier for output, e.g. "Deployment/web". A synthetic
-// flag-based workload has no meaningful name and is shown as just "workload".
-func (w *Workload) Label() string {
-	if w.Kind == "flags" {
-		return "workload"
-	}
-	return w.Kind + "/" + w.Name
-}
-
 // Replica builds the pod (and any synthetic PVCs it references) for the given
 // zero-based replica ordinal. The returned pod has a unique name, the workload
 // namespace, an empty NodeName, and the default scheduler implied.

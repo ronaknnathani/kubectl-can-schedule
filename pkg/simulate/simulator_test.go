@@ -207,8 +207,8 @@ spec:
 	if !w.Schedulable() || w.ReplicasFit != 3 {
 		t.Fatalf("deployment: fit=%d schedulable=%v, want 3/true", w.ReplicasFit, w.Schedulable())
 	}
-	if w.Label != "Deployment/web" {
-		t.Errorf("label = %q, want Deployment/web", w.Label)
+	if w.Kind != "Deployment" || w.Name != "web" {
+		t.Errorf("kind/name = %q/%q, want Deployment/web", w.Kind, w.Name)
 	}
 }
 

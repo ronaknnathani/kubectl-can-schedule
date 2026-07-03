@@ -9,31 +9,40 @@ not a scorer or an optimizer — it does not try to find the *best* node, it onl
 reports whether the requested replicas fit.
 
 ```
-$ kubectl can-schedule --resource cpu=2 --resource nvidia.com/gpu=1 --replicas 3
+$ kubectl can-schedule -f frontend.yaml -f cache.yaml -f trainer.yaml
 
 Cluster: 4 node(s)
 
-workload (3 replicas)
-╭────────────────┬─────────────┬───────────┬───────────┬─────────────╮
-│    RESOURCE    │ ALLOCATABLE │ ALLOCATED │ REQUESTED │   STATUS    │
-├────────────────┼─────────────┼───────────┼───────────┼─────────────┤
-│ cpu            │ 72          │ 1.25 (2%) │ 6 (8%)    │ OK          │
-│ nvidia.com/gpu │ 0           │ 0         │ 3         │ NOT PRESENT │
-╰────────────────┴─────────────┴───────────┴───────────┴─────────────╯
-Feasible nodes: 0 of 4
-Result: NOT SCHEDULABLE — 0 of 3 replicas fit
-  - no node provides resource type "nvidia.com/gpu"
-  - filter TaintToleration rejected nodes: node(s) had untolerated taint(s)
+Cluster capacity:
+╭────────────────┬─────────────┬────────────╮
+│    RESOURCE    │ ALLOCATABLE │ ALLOCATED  │
+├────────────────┼─────────────┼────────────┤
+│ cpu            │ 72          │ 1.25 (2%)  │
+│ memory         │ 30.99Gi     │ 440Mi (1%) │
+│ nvidia.com/gpu │ 0           │ 0          │
+╰────────────────┴─────────────┴────────────╯
+
+Workloads:
+╭─────────────┬──────────┬──────────┬────────┬────────────┬────────────────┬─────┬────────────────────────╮
+│    KIND     │   NAME   │ FEASIBLE │  cpu   │   memory   │ nvidia.com/gpu │ FIT │         REASON         │
+├─────────────┼──────────┼──────────┼────────┼────────────┼────────────────┼─────┼────────────────────────┤
+│ Deployment  │ frontend │ 3/4      │ 2 (3%) │ 512Mi (2%) │ -              │ 2/2 │ -                      │
+│ StatefulSet │ cache    │ 3/4      │ 2 (3%) │ 1Gi (3%)   │ -              │ 2/2 │ -                      │
+│ Pod         │ trainer  │ 0/4      │ 2 (3%) │ -          │ 2              │ 0/1 │ missing nvidia.com/gpu │
+╰─────────────┴──────────┴──────────┴────────┴────────────┴────────────────┴─────┴────────────────────────╯
+
+Overall: NOT SCHEDULABLE — at least one workload does not fit.
 ```
 
-For each workload the report shows how much of every requested resource the
-cluster has (`ALLOCATABLE`), how much is already in use (`ALLOCATED`), how much
-the workload wants (`REQUESTED`, each as a percentage of allocatable), and a
-per-resource `STATUS` — `OK`, `INSUFFICIENT` (present but not enough), or
-`NOT PRESENT` (no node advertises it). It also reports how many nodes a single
-replica passes all filters on (`Feasible nodes`), the fit verdict
-(`SCHEDULABLE` / `PARTIAL` / `NOT SCHEDULABLE`), and the reasons anything did not
-fit. Status and verdict are color-coded (pastel green/amber/red) on a terminal.
+The **cluster capacity** table (shown once) reports, per requested resource,
+total `ALLOCATABLE` and how much is already `ALLOCATED` with its percentage. The
+**workloads** table has one row per input object: its `KIND` and `NAME`, how many
+nodes a single replica passes all filters on (`FEASIBLE`), the amount each
+resource `REQUESTED` (as a percentage of allocatable), the fit ratio (`FIT` =
+placed/requested), and a concise `REASON` when it does not fully fit. Requested
+cells and the `FIT` ratio are color-coded (pastel green/amber/red) on a terminal
+— green fits, amber is partial or insufficient, red does not fit or is absent. A
+single `Overall` verdict closes the report.
 
 ## How it works
 

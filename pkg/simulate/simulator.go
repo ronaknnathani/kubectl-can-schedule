@@ -59,7 +59,8 @@ type ResourceStatus struct {
 
 // WorkloadResult is the outcome for a single input object.
 type WorkloadResult struct {
-	Label          string           // e.g. "Deployment/web" or "workload"
+	Kind           string           // Pod | Deployment | StatefulSet | flags
+	Name           string           // object name (empty for a flag-based workload)
 	Replicas       int              // requested
 	ReplicasFit    int              // placed by the simulation
 	FeasibleNodes  int              // nodes a single replica passes all filters on
@@ -192,7 +193,8 @@ func (s *Simulator) Run(workloads []*input.Workload) (*Result, error) {
 
 func (s *Simulator) runWorkload(w *input.Workload, allocated corev1.ResourceList) (*WorkloadResult, error) {
 	wr := &WorkloadResult{
-		Label:         w.Label(),
+		Kind:          w.Kind,
+		Name:          w.Name,
 		Replicas:      int(w.Replicas),
 		FilterReasons: map[string]string{},
 	}
