@@ -36,7 +36,7 @@ func newNode(name, cpu, mem string) *corev1.Node {
 }
 
 func newPod(name, node, cpu, mem string, prio int32) *corev1.Pod {
-	p := &corev1.Pod{
+	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: corev1.PodSpec{
 			NodeName: node,
@@ -51,7 +51,6 @@ func newPod(name, node, cpu, mem string, prio int32) *corev1.Pod {
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
-	return p
 }
 
 func runSim(t *testing.T, objs []runtime.Object, opts Options, workloads []*input.Workload) *Result {
@@ -70,27 +69,43 @@ func runSim(t *testing.T, objs []runtime.Object, opts Options, workloads []*inpu
 	return res
 }
 
-func TestFlagsPackingAcrossNodes(t *testing.T) {
+func parseManifest(t *testing.T, manifest string) []*input.Workload {
+	t.Helper()
+	wls, err := input.ParseFiles([]string{"-"}, "default", strings.NewReader(manifest))
+	if err != nil {
+		t.Fatalf("ParseFiles: %v", err)
+	}
+	return wls
+}
+
+func TestFlagsPackingAcrossNodesAndCapacity(t *testing.T) {
 	objs := []runtime.Object{
 		newNode("node-a", "4", "8Gi"),
 		newNode("node-b", "4", "8Gi"),
 		newNode("node-c", "4", "8Gi"),
 	}
 	reqs := corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}
-	wl := input.FromFlags(reqs, 8, "default", "probe")
+	wl := input.FromFlags(reqs, 8, "default")
 
 	res := runSim(t, objs, Options{}, []*input.Workload{wl})
 
-	if res.TotalNodes != 3 {
-		t.Fatalf("TotalNodes = %d, want 3", res.TotalNodes)
+	if res.NodeCount != 3 {
+		t.Fatalf("NodeCount = %d, want 3", res.NodeCount)
 	}
 	// Each node fits 2 (4 cpu / 2). 3 nodes => 6 fit, 2 do not.
-	got := res.Workloads[0].ReplicasFit
-	if got != 6 {
-		t.Fatalf("ReplicasFit = %d, want 6", got)
+	if res.ReplicasFit != 6 || res.ReplicasRequested != 8 {
+		t.Fatalf("fit/requested = %d/%d, want 6/8", res.ReplicasFit, res.ReplicasRequested)
 	}
-	if res.AllSchedulable {
-		t.Fatalf("expected AllSchedulable=false")
+	if res.Schedulable {
+		t.Fatalf("expected Schedulable=false")
+	}
+	// Allocatable is summed across all nodes (3 x 4 = 12 cpu); requested is
+	// per-replica x replicas (2 x 8 = 16 cpu).
+	if got := res.Allocatable.Cpu().String(); got != "12" {
+		t.Errorf("allocatable cpu = %s, want 12", got)
+	}
+	if got := res.Requested.Cpu().String(); got != "16" {
+		t.Errorf("requested cpu = %s, want 16", got)
 	}
 }
 
@@ -101,11 +116,11 @@ func TestExistingPodsReduceCapacity(t *testing.T) {
 		newPod("busy", "node-a", "3", "1Gi", 0),
 	}
 	reqs := corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}
-	wl := input.FromFlags(reqs, 1, "default", "probe")
+	wl := input.FromFlags(reqs, 1, "default")
 
 	res := runSim(t, objs, Options{}, []*input.Workload{wl})
-	if res.Workloads[0].ReplicasFit != 0 {
-		t.Fatalf("ReplicasFit = %d, want 0 (only 1 cpu free, request 2)", res.Workloads[0].ReplicasFit)
+	if res.ReplicasFit != 0 || res.Schedulable {
+		t.Fatalf("fit=%d schedulable=%v, want 0/false (only 1 cpu free, request 2)", res.ReplicasFit, res.Schedulable)
 	}
 }
 
@@ -133,13 +148,9 @@ spec:
             cpu: "1"
             memory: 256Mi
 `
-	wls, err := input.ParseFiles([]string{"-"}, "default", strings.NewReader(manifest))
-	if err != nil {
-		t.Fatalf("ParseFiles: %v", err)
-	}
-	res := runSim(t, objs, Options{}, wls)
-	if !res.AllSchedulable || res.Workloads[0].ReplicasFit != 3 {
-		t.Fatalf("deployment: fit=%d schedulable=%v, want 3/true", res.Workloads[0].ReplicasFit, res.AllSchedulable)
+	res := runSim(t, objs, Options{}, parseManifest(t, manifest))
+	if !res.Schedulable || res.ReplicasFit != 3 {
+		t.Fatalf("deployment: fit=%d schedulable=%v, want 3/true", res.ReplicasFit, res.Schedulable)
 	}
 }
 
@@ -184,30 +195,37 @@ spec:
         requests:
           storage: 1Gi
 `
-	wls, err := input.ParseFiles([]string{"-"}, "default", strings.NewReader(manifest))
-	if err != nil {
-		t.Fatalf("ParseFiles: %v", err)
-	}
-	res := runSim(t, objs, Options{}, wls)
-	if !res.AllSchedulable || res.Workloads[0].ReplicasFit != 2 {
-		t.Fatalf("statefulset: fit=%d schedulable=%v, want 2/true; reasons=%v",
-			res.Workloads[0].ReplicasFit, res.AllSchedulable, firstReasons(res.Workloads[0]))
+	res := runSim(t, objs, Options{}, parseManifest(t, manifest))
+	if !res.Schedulable || res.ReplicasFit != 2 {
+		t.Fatalf("statefulset: fit=%d schedulable=%v reasons=%v, want 2/true",
+			res.ReplicasFit, res.Schedulable, res.Reasons)
 	}
 }
 
 func TestCumulativeBatchCompetesForCapacity(t *testing.T) {
 	objs := []runtime.Object{newNode("node-a", "4", "8Gi")}
 	// First workload consumes all 4 cpu (2 replicas x 2 cpu).
-	a := input.FromFlags(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}, 2, "default", "a")
-	// Second workload needs 1 cpu but none remains.
-	b := input.FromFlags(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}, 1, "default", "b")
+	a := input.FromFlags(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}, 2, "default")
+	// Second workload needs 1 cpu but none remains after the first consumed it.
+	b := input.FromFlags(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}, 1, "default")
 
 	res := runSim(t, objs, Options{}, []*input.Workload{a, b})
-	if res.Workloads[0].ReplicasFit != 2 {
-		t.Fatalf("workload a fit=%d, want 2", res.Workloads[0].ReplicasFit)
+	// 2 (a) fit, the single b replica does not -> 2 of 3.
+	if res.ReplicasRequested != 3 || res.ReplicasFit != 2 || res.Schedulable {
+		t.Fatalf("fit/requested/schedulable = %d/%d/%v, want 2/3/false", res.ReplicasFit, res.ReplicasRequested, res.Schedulable)
 	}
-	if res.Workloads[1].ReplicasFit != 0 {
-		t.Fatalf("workload b fit=%d, want 0 (no capacity left)", res.Workloads[1].ReplicasFit)
+}
+
+func TestImpossibleWorkloadReportsReason(t *testing.T) {
+	objs := []runtime.Object{newNode("node-a", "4", "8Gi")}
+	wl := input.FromFlags(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100")}, 1, "default")
+
+	res := runSim(t, objs, Options{}, []*input.Workload{wl})
+	if res.Schedulable {
+		t.Fatal("expected not schedulable for a 100-cpu request on a 4-cpu node")
+	}
+	if _, ok := res.Reasons["NodeResourcesFit"]; !ok {
+		t.Fatalf("expected a NodeResourcesFit reason, got %v", res.Reasons)
 	}
 }
 
@@ -215,31 +233,17 @@ func TestPreemption(t *testing.T) {
 	highManifest := `
 apiVersion: v1
 kind: Pod
-metadata:
-  name: high
-  namespace: default
+metadata: {name: high, namespace: default}
 spec:
   priorityClassName: high
-  containers:
-  - name: c
-    image: busybox
-    resources:
-      requests:
-        cpu: "4"
+  containers: [{name: c, image: busybox, resources: {requests: {cpu: "4"}}}]
 `
 	defaultManifest := `
 apiVersion: v1
 kind: Pod
-metadata:
-  name: plain
-  namespace: default
+metadata: {name: plain, namespace: default}
 spec:
-  containers:
-  - name: c
-    image: busybox
-    resources:
-      requests:
-        cpu: "4"
+  containers: [{name: c, image: busybox, resources: {requests: {cpu: "4"}}}]
 `
 	mkObjs := func() []runtime.Object {
 		return []runtime.Object{
@@ -248,59 +252,38 @@ spec:
 			&schedulingv1.PriorityClass{ObjectMeta: metav1.ObjectMeta{Name: "high"}, Value: 1000},
 		}
 	}
-	parse := func(manifest string) []*input.Workload {
-		t.Helper()
-		wls, err := input.ParseFiles([]string{"-"}, "default", strings.NewReader(manifest))
-		if err != nil {
-			t.Fatalf("ParseFiles: %v", err)
-		}
-		return wls
-	}
 
 	// Without preemption: high-priority pod cannot fit on the full node.
-	resNo := runSim(t, mkObjs(), Options{}, parse(highManifest))
-	if resNo.Workloads[0].ReplicasFit != 0 {
-		t.Fatalf("no-preempt: fit=%d, want 0", resNo.Workloads[0].ReplicasFit)
+	resNo := runSim(t, mkObjs(), Options{}, parseManifest(t, highManifest))
+	if resNo.ReplicasFit != 0 {
+		t.Fatalf("no-preempt: fit=%d, want 0", resNo.ReplicasFit)
 	}
 
 	// With preemption + a class above default: fits by evicting the low-priority pod.
-	resYes := runSim(t, mkObjs(), Options{ConsiderPreemption: true}, parse(highManifest))
-	if resYes.Workloads[0].ReplicasFit != 1 {
-		t.Fatalf("preempt: fit=%d, want 1", resYes.Workloads[0].ReplicasFit)
+	resYes := runSim(t, mkObjs(), Options{ConsiderPreemption: true}, parseManifest(t, highManifest))
+	if resYes.ReplicasFit != 1 || !resYes.Schedulable {
+		t.Fatalf("preempt: fit=%d schedulable=%v, want 1/true", resYes.ReplicasFit, resYes.Schedulable)
 	}
-	if !resYes.Workloads[0].Replicas[0].ViaPreemption {
-		t.Fatalf("expected ViaPreemption=true")
+	if !resYes.UsedPreemption {
+		t.Fatalf("expected UsedPreemption=true")
 	}
 
 	// With preemption flag but a default-priority incoming pod: no-op, cannot fit.
-	resDefault := runSim(t, mkObjs(), Options{ConsiderPreemption: true}, parse(defaultManifest))
-	if resDefault.Workloads[0].ReplicasFit != 0 {
-		t.Fatalf("preempt no-op: fit=%d, want 0 (incoming pod at default priority)", resDefault.Workloads[0].ReplicasFit)
+	resDefault := runSim(t, mkObjs(), Options{ConsiderPreemption: true}, parseManifest(t, defaultManifest))
+	if resDefault.ReplicasFit != 0 || resDefault.UsedPreemption {
+		t.Fatalf("preempt no-op: fit=%d usedPreemption=%v, want 0/false (incoming pod at default priority)",
+			resDefault.ReplicasFit, resDefault.UsedPreemption)
 	}
 }
 
-func firstReasons(wl WorkloadResult) map[string]string {
-	for _, r := range wl.Replicas {
-		if !r.Fit {
-			return r.Reasons
-		}
-	}
-	return nil
-}
-
-func TestShortCircuitStopsAfterFirstFailure(t *testing.T) {
+func TestPartialFitReportsCount(t *testing.T) {
 	objs := []runtime.Object{newNode("node-a", "4", "8Gi")}
-	// 2 cpu per replica on a 4 cpu node => only 2 fit; ask for 5.
-	wl := input.FromFlags(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}, 5, "default", "probe")
+	// 2 cpu per replica on a 4 cpu node => only 2 of 5 fit.
+	wl := input.FromFlags(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}, 5, "default")
 	res := runSim(t, objs, Options{}, []*input.Workload{wl})
 
-	if res.Workloads[0].ReplicasFit != 2 {
-		t.Fatalf("ReplicasFit = %d, want 2", res.Workloads[0].ReplicasFit)
-	}
-	// The replica list must stop at the first failure (ordinals 0,1 fit + 2 failed),
-	// not contain an entry for every requested replica.
-	if got := len(res.Workloads[0].Replicas); got != 3 {
-		t.Fatalf("len(Replicas) = %d, want 3 (short-circuit after first failure)", got)
+	if res.ReplicasRequested != 5 || res.ReplicasFit != 2 || res.Schedulable {
+		t.Fatalf("fit/requested/schedulable = %d/%d/%v, want 2/5/false", res.ReplicasFit, res.ReplicasRequested, res.Schedulable)
 	}
 }
 
@@ -317,26 +300,19 @@ kind: Pod
 metadata: {name: high, namespace: default}
 spec:
   priorityClassName: high
-  containers:
-  - name: c
-    image: busybox
-    resources: {requests: {cpu: "9"}}
+  containers: [{name: c, image: busybox, resources: {requests: {cpu: "9"}}}]
 `
-	high, err := input.ParseFiles([]string{"-"}, "default", strings.NewReader(highManifest))
-	if err != nil {
-		t.Fatalf("ParseFiles: %v", err)
-	}
+	high := parseManifest(t, highManifest)
 	// A follow-on, default-priority workload needing 1 cpu. It must NOT fit:
 	// minimal preemption evicts only `big` (freeing 9), leaving `small` using the
 	// last cpu. Over-eviction (evicting small too) would wrongly free room for it.
-	probe := input.FromFlags(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}, 1, "default", "probe")
+	probe := input.FromFlags(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}, 1, "default")
 
 	res := runSim(t, objs, Options{ConsiderPreemption: true}, []*input.Workload{high[0], probe})
-	if res.Workloads[0].ReplicasFit != 1 || !res.Workloads[0].Replicas[0].ViaPreemption {
-		t.Fatalf("high: fit=%d viaPreempt=%v, want 1/true", res.Workloads[0].ReplicasFit, res.Workloads[0].Replicas[0].ViaPreemption)
-	}
-	if res.Workloads[1].ReplicasFit != 0 {
-		t.Fatalf("probe fit=%d, want 0 (minimal preemption must not over-free capacity)", res.Workloads[1].ReplicasFit)
+	// Only the high-priority replica fits (via preemption); the probe does not.
+	if res.ReplicasFit != 1 || !res.UsedPreemption || res.Schedulable {
+		t.Fatalf("fit=%d usedPreemption=%v schedulable=%v, want 1/true/false (minimal preemption must not over-free)",
+			res.ReplicasFit, res.UsedPreemption, res.Schedulable)
 	}
 }
 
@@ -360,22 +336,50 @@ spec:
   priorityClassName: high
   containers: [{name: c, image: busybox, resources: {requests: {cpu: "4"}}}]
 `
-	low, err := input.ParseFiles([]string{"-"}, "default", strings.NewReader(lowManifest))
-	if err != nil {
-		t.Fatalf("ParseFiles low: %v", err)
-	}
-	high, err := input.ParseFiles([]string{"-"}, "default", strings.NewReader(highManifest))
-	if err != nil {
-		t.Fatalf("ParseFiles high: %v", err)
-	}
+	low := parseManifest(t, lowManifest)
+	high := parseManifest(t, highManifest)
 	// `low` is placed first (fills the node). `high` must NOT preempt it: a later
 	// workload may not cannibalize an earlier one already counted as schedulable.
 	res := runSim(t, objs, Options{ConsiderPreemption: true}, []*input.Workload{low[0], high[0]})
-	if res.Workloads[0].ReplicasFit != 1 {
-		t.Fatalf("low fit=%d, want 1", res.Workloads[0].ReplicasFit)
+	if res.ReplicasFit != 1 || res.Schedulable || res.UsedPreemption {
+		t.Fatalf("fit=%d schedulable=%v usedPreemption=%v, want 1/false/false (must not evict a simulated replica)",
+			res.ReplicasFit, res.Schedulable, res.UsedPreemption)
 	}
-	if res.Workloads[1].ReplicasFit != 0 {
-		t.Fatalf("high fit=%d, want 0 (must not evict a simulated replica)", res.Workloads[1].ReplicasFit)
+}
+
+func TestStatefulSetUsesDefaultStorageClass(t *testing.T) {
+	// A default StorageClass with WaitForFirstConsumer binding, mirroring kind.
+	defaultSC := &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "standard",
+			Annotations: map[string]string{"storageclass.kubernetes.io/is-default-class": "true"},
+		},
+		Provisioner:       "example.com/local",
+		VolumeBindingMode: ptr.To(storagev1.VolumeBindingWaitForFirstConsumer),
+	}
+	objs := []runtime.Object{newNode("node-a", "8", "16Gi"), defaultSC}
+	// volumeClaimTemplates omits storageClassName, so it must inherit the default.
+	manifest := `
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: db, namespace: default}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: db}}
+  template:
+    metadata: {labels: {app: db}}
+    spec:
+      containers: [{name: db, image: postgres, resources: {requests: {cpu: "1"}}, volumeMounts: [{name: data, mountPath: /data}]}]
+  volumeClaimTemplates:
+  - metadata: {name: data}
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources: {requests: {storage: 1Gi}}
+`
+	res := runSim(t, objs, Options{}, parseManifest(t, manifest))
+	if !res.Schedulable || res.ReplicasFit != 1 {
+		t.Fatalf("statefulset with default SC: fit=%d schedulable=%v reasons=%v, want 1/true",
+			res.ReplicasFit, res.Schedulable, res.Reasons)
 	}
 }
 
@@ -388,10 +392,7 @@ spec:
   priorityClassName: does-not-exist
   containers: [{name: c, image: busybox, resources: {requests: {cpu: "1"}}}]
 `
-	wls, err := input.ParseFiles([]string{"-"}, "default", strings.NewReader(manifest))
-	if err != nil {
-		t.Fatalf("ParseFiles: %v", err)
-	}
+	wls := parseManifest(t, manifest)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	client := fakeclient.NewSimpleClientset(newNode("node-a", "4", "8Gi"))
@@ -405,34 +406,35 @@ spec:
 }
 
 func TestNodeSelectorExcludesNodes(t *testing.T) {
-	nodeA := newNode("node-a", "8", "16Gi")
-	nodeA.Labels = map[string]string{"disktype": "ssd"}
-	nodeB := newNode("node-b", "8", "16Gi")
-	objs := []runtime.Object{nodeA, nodeB}
-
-	manifest := `
+	newObjs := func() []runtime.Object {
+		nodeA := newNode("node-a", "8", "16Gi")
+		nodeA.Labels = map[string]string{"disktype": "ssd"}
+		nodeB := newNode("node-b", "8", "16Gi")
+		return []runtime.Object{nodeA, nodeB}
+	}
+	manifest := func(disktype string) string {
+		return `
 apiVersion: v1
 kind: Pod
-metadata:
-  name: needs-ssd
-  namespace: default
+metadata: {name: needs-disk, namespace: default}
 spec:
-  nodeSelector:
-    disktype: ssd
-  containers:
-  - name: c
-    image: busybox
-    resources:
-      requests:
-        cpu: "1"
+  nodeSelector: {disktype: ` + disktype + `}
+  containers: [{name: c, image: busybox, resources: {requests: {cpu: "1"}}}]
 `
-	wls, err := input.ParseFiles([]string{"-"}, "default", strings.NewReader(manifest))
-	if err != nil {
-		t.Fatalf("ParseFiles: %v", err)
 	}
-	res := runSim(t, objs, Options{}, wls)
-	if !res.AllSchedulable || res.Workloads[0].Replicas[0].Node != "node-a" {
-		t.Fatalf("nodeSelector: expected placement on node-a, got node=%q schedulable=%v",
-			res.Workloads[0].Replicas[0].Node, res.AllSchedulable)
+
+	// Only node-a is labelled ssd, so the pod fits.
+	fits := runSim(t, newObjs(), Options{}, parseManifest(t, manifest("ssd")))
+	if !fits.Schedulable {
+		t.Fatalf("selector disktype=ssd should be schedulable on node-a, reasons=%v", fits.Reasons)
+	}
+
+	// No node is labelled nvme, so the selector excludes every node.
+	excluded := runSim(t, newObjs(), Options{}, parseManifest(t, manifest("nvme")))
+	if excluded.Schedulable {
+		t.Fatal("selector disktype=nvme should exclude all nodes")
+	}
+	if len(excluded.Reasons) == 0 {
+		t.Fatal("expected a rejection reason when the selector matches no node")
 	}
 }

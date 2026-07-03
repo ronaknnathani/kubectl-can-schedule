@@ -65,7 +65,7 @@ func decodeDocuments(data []byte, source, defaultNS string) ([]*Workload, error)
 		if err != nil {
 			return nil, fmt.Errorf("%s: decoding object: %w", source, err)
 		}
-		w, err := workloadFromObject(obj, source, defaultNS)
+		w, err := workloadFromObject(obj, defaultNS)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %s: %w", source, gvk, err)
 		}
@@ -74,7 +74,7 @@ func decodeDocuments(data []byte, source, defaultNS string) ([]*Workload, error)
 	return workloads, nil
 }
 
-func workloadFromObject(obj runtime.Object, source, defaultNS string) (*Workload, error) {
+func workloadFromObject(obj runtime.Object, defaultNS string) (*Workload, error) {
 	switch o := obj.(type) {
 	case *corev1.Pod:
 		ns := namespaceOr(o.Namespace, defaultNS)
@@ -82,11 +82,9 @@ func workloadFromObject(obj runtime.Object, source, defaultNS string) (*Workload
 		base := o.DeepCopy()
 		base.Namespace = ns
 		return &Workload{
-			Kind:      "Pod",
 			Name:      name,
 			Namespace: ns,
 			Replicas:  1,
-			Source:    source,
 			base:      base,
 		}, nil
 	case *appsv1.Deployment:
@@ -97,11 +95,9 @@ func workloadFromObject(obj runtime.Object, source, defaultNS string) (*Workload
 			return nil, fmt.Errorf("Deployment %s: %w", name, err)
 		}
 		return &Workload{
-			Kind:      "Deployment",
 			Name:      name,
 			Namespace: ns,
 			Replicas:  replicas,
-			Source:    source,
 			base:      podFromTemplate(o.Spec.Template, ns),
 		}, nil
 	case *appsv1.StatefulSet:
@@ -112,11 +108,9 @@ func workloadFromObject(obj runtime.Object, source, defaultNS string) (*Workload
 			return nil, fmt.Errorf("StatefulSet %s: %w", name, err)
 		}
 		return &Workload{
-			Kind:                 "StatefulSet",
 			Name:                 name,
 			Namespace:            ns,
 			Replicas:             replicas,
-			Source:               source,
 			base:                 podFromTemplate(o.Spec.Template, ns),
 			volumeClaimTemplates: o.Spec.VolumeClaimTemplates,
 		}, nil

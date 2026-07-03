@@ -52,10 +52,8 @@ func ParseResourceFlags(pairs []string) (corev1.ResourceList, error) {
 
 // FromFlags builds a synthetic Workload of `replicas` identical pods, each
 // requesting `requests`.
-func FromFlags(requests corev1.ResourceList, replicas int32, namespace, name string) *Workload {
-	if name == "" {
-		name = "can-schedule-probe"
-	}
+func FromFlags(requests corev1.ResourceList, replicas int32, namespace string) *Workload {
+	const name = "can-schedule-probe"
 	if namespace == "" {
 		namespace = "default"
 	}
@@ -72,11 +70,9 @@ func FromFlags(requests corev1.ResourceList, replicas int32, namespace, name str
 		},
 	}
 	return &Workload{
-		Kind:      "flags",
 		Name:      name,
 		Namespace: namespace,
 		Replicas:  replicas,
-		Source:    "flags",
 		base:      base,
 	}
 }

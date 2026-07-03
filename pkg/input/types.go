@@ -17,11 +17,9 @@ import (
 
 // Workload is a single schedulable input object expanded to a replica count.
 type Workload struct {
-	Kind      string // Pod | Deployment | StatefulSet | (flags)
 	Name      string
 	Namespace string
 	Replicas  int32
-	Source    string // file path or "flags"
 
 	// base is the pod template for a single replica (one container set, volumes,
 	// affinity, tolerations, resource requests, ...). Per-replica pods are derived

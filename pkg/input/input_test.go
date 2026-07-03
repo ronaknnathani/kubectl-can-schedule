@@ -57,14 +57,16 @@ spec:
 	if len(wls) != 3 {
 		t.Fatalf("got %d workloads, want 3", len(wls))
 	}
-	if wls[0].Kind != "Pod" || wls[0].Replicas != 1 {
-		t.Errorf("pod: got kind=%s replicas=%d", wls[0].Kind, wls[0].Replicas)
+	// Replica counts distinguish the three objects: a bare Pod is always 1, and
+	// the Deployment/StatefulSet carry their own spec.replicas.
+	if wls[0].Replicas != 1 {
+		t.Errorf("pod: got replicas=%d, want 1", wls[0].Replicas)
 	}
-	if wls[1].Kind != "Deployment" || wls[1].Replicas != 4 {
-		t.Errorf("deployment: got kind=%s replicas=%d", wls[1].Kind, wls[1].Replicas)
+	if wls[1].Replicas != 4 {
+		t.Errorf("deployment: got replicas=%d, want 4", wls[1].Replicas)
 	}
-	if wls[2].Kind != "StatefulSet" || wls[2].Replicas != 2 {
-		t.Errorf("statefulset: got kind=%s replicas=%d", wls[2].Kind, wls[2].Replicas)
+	if wls[2].Replicas != 2 {
+		t.Errorf("statefulset: got replicas=%d, want 2", wls[2].Replicas)
 	}
 	// Namespace defaulting applies when the manifest omits a namespace.
 	if wls[0].Namespace != "myns" {

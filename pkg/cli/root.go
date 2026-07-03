@@ -10,15 +10,15 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/ronaknnathani/kubectl-can-schedule/pkg/input"
 	"github.com/ronaknnathani/kubectl-can-schedule/pkg/output"
 	"github.com/ronaknnathani/kubectl-can-schedule/pkg/simulate"
 )
 
-const longDescription = `Report how many nodes / replicas can be scheduled in a cluster.
+const longDescription = `Report whether a workload fits in a cluster right now.
 
 can-schedule runs the default scheduler's filter plugins (PreFilter + Filter) for
 each candidate pod against a live snapshot of the cluster, greedily placing
@@ -39,15 +39,14 @@ Multiple input objects are treated as one cumulative batch competing for the
 same capacity, in input order. Exit code is non-zero unless every replica fits.`
 
 type options struct {
-	configFlags *genericclioptions.ConfigFlags
+	kubeconfig string
+	context    string
+	namespace  string
 
 	filenames  []string
 	resources  []string
 	replicas   int32
 	preemption bool
-	outputFmt  string
-	verbose    bool
-	name       string
 
 	exitCode int
 }
@@ -65,7 +64,6 @@ func Execute() int {
 
 // newCommand builds the cobra command bound to the given options.
 func newCommand(o *options) *cobra.Command {
-	o.configFlags = genericclioptions.NewConfigFlags(true)
 	cmd := &cobra.Command{
 		Use:           "kubectl-can_schedule",
 		Short:         "Check whether pods/deployments/statefulsets can be scheduled in a cluster",
@@ -78,6 +76,9 @@ func newCommand(o *options) *cobra.Command {
 	}
 
 	flags := cmd.Flags()
+	flags.StringVar(&o.kubeconfig, "kubeconfig", "", "Path to the kubeconfig file to use (defaults to the standard loading rules)")
+	flags.StringVar(&o.context, "context", "", "Name of the kubeconfig context to use (defaults to the current context)")
+	flags.StringVarP(&o.namespace, "namespace", "n", "", "Namespace for manifests/pods that don't specify one")
 	flags.StringArrayVarP(&o.filenames, "filename", "f", nil,
 		"Manifest file containing Pod/Deployment/StatefulSet objects; repeatable; '-' for stdin")
 	flags.StringArrayVar(&o.resources, "resource", nil,
@@ -85,27 +86,20 @@ func newCommand(o *options) *cobra.Command {
 	flags.Int32Var(&o.replicas, "replicas", 1, "Replica count for flag-based input")
 	flags.BoolVar(&o.preemption, "consider-preemption", false,
 		"Also consider preemption of lower-priority pods (no-op for pods at/below default priority)")
-	flags.StringVarP(&o.outputFmt, "output", "o", "table", "Output format: table, json, or yaml")
-	flags.BoolVar(&o.verbose, "verbose", false, "Show per-filter-plugin rejection reasons for unschedulable workloads")
-	flags.StringVar(&o.name, "name", "", "Name for the synthetic flag-based workload")
-	o.configFlags.AddFlags(flags)
 	return cmd
 }
 
 func (o *options) run(cmd *cobra.Command) error {
-	format, err := output.ParseFormat(o.outputFmt)
-	if err != nil {
-		return err
-	}
 	if err := o.validateFlags(cmd); err != nil {
 		return err
 	}
 
-	restConfig, err := o.configFlags.ToRESTConfig()
+	clientConfig := o.clientConfig()
+	restConfig, err := clientConfig.ClientConfig()
 	if err != nil {
 		return fmt.Errorf("loading kubeconfig: %w", err)
 	}
-	namespace, _, err := o.configFlags.ToRawKubeConfigLoader().Namespace()
+	namespace, _, err := clientConfig.Namespace()
 	if err != nil {
 		return fmt.Errorf("resolving namespace: %w", err)
 	}
@@ -129,13 +123,30 @@ func (o *options) run(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	if err := output.Render(cmd.OutOrStdout(), result, format, o.verbose); err != nil {
+	if err := output.Render(cmd.OutOrStdout(), result); err != nil {
 		return err
 	}
-	if !result.AllSchedulable {
+	if !result.Schedulable {
 		o.exitCode = 1
 	}
 	return nil
+}
+
+// clientConfig builds a kubeconfig loader honoring --kubeconfig, --context, and
+// --namespace on top of the standard loading rules (KUBECONFIG env, default path).
+func (o *options) clientConfig() clientcmd.ClientConfig {
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if o.kubeconfig != "" {
+		rules.ExplicitPath = o.kubeconfig
+	}
+	overrides := &clientcmd.ConfigOverrides{}
+	if o.context != "" {
+		overrides.CurrentContext = o.context
+	}
+	if o.namespace != "" {
+		overrides.Context.Namespace = o.namespace
+	}
+	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides)
 }
 
 // validateFlags enforces that exactly one input source is given and that
@@ -167,5 +178,5 @@ func (o *options) buildWorkloads(namespace string, stdin io.Reader) ([]*input.Wo
 	if err != nil {
 		return nil, err
 	}
-	return []*input.Workload{input.FromFlags(requests, o.replicas, namespace, o.name)}, nil
+	return []*input.Workload{input.FromFlags(requests, o.replicas, namespace)}, nil
 }

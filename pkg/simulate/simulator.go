@@ -11,10 +11,12 @@ import (
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
+	apiresource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/component-helpers/resource"
 	helpers "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 
@@ -30,32 +32,31 @@ type Options struct {
 	ConsiderPreemption bool
 }
 
-// ReplicaResult is the outcome for a single replica.
-type ReplicaResult struct {
-	Ordinal       int               `json:"ordinal"`
-	Fit           bool              `json:"fit"`
-	Node          string            `json:"node,omitempty"`
-	ViaPreemption bool              `json:"viaPreemption,omitempty"`
-	Reasons       map[string]string `json:"reasons,omitempty"`
-}
-
-// WorkloadResult aggregates the outcome for one input object.
-type WorkloadResult struct {
-	Kind              string          `json:"kind"`
-	Name              string          `json:"name"`
-	Namespace         string          `json:"namespace"`
-	Source            string          `json:"source"`
-	ReplicasRequested int32           `json:"replicasRequested"`
-	ReplicasFit       int32           `json:"replicasFit"`
-	Schedulable       bool            `json:"schedulable"`
-	Replicas          []ReplicaResult `json:"replicas,omitempty"`
-}
-
-// Result is the overall simulation outcome.
+// Result is the outcome of a schedulability check: what the cluster can offer,
+// what the workload asked for, whether it fits, and — when it does not — why.
 type Result struct {
-	TotalNodes     int              `json:"totalNodes"`
-	AllSchedulable bool             `json:"allSchedulable"`
-	Workloads      []WorkloadResult `json:"workloads"`
+	// NodeCount is the number of nodes in the cluster.
+	NodeCount int
+	// Allocatable is the total allocatable capacity summed across all nodes,
+	// restricted to the resources the workload actually requests.
+	Allocatable corev1.ResourceList
+	// Requested is the total resources requested across every replica of every
+	// input workload.
+	Requested corev1.ResourceList
+
+	// ReplicasRequested and ReplicasFit report how many pods were asked for and
+	// how many the simulation could place.
+	ReplicasRequested int
+	ReplicasFit       int
+	// Schedulable is true when every requested replica was placed.
+	Schedulable bool
+	// UsedPreemption is true when at least one replica only fit by preempting
+	// lower-priority pods.
+	UsedPreemption bool
+
+	// Reasons maps each filter plugin that rejected the workload to an example
+	// message, explaining why replicas could not be placed. Empty when Schedulable.
+	Reasons map[string]string
 }
 
 // Simulator holds the constructed framework and the mutable cluster view.
@@ -69,6 +70,11 @@ type Simulator struct {
 	nodeOrder     []string
 	scheduledPods []*corev1.Pod
 	pvcStore      cache.Store
+
+	// defaultStorageClass is the cluster's default StorageClass name (empty if
+	// none). Synthesized PVCs that omit a storageClassName inherit it, mirroring
+	// the PVC admission plugin, so StatefulSet volume claims schedule realistically.
+	defaultStorageClass string
 
 	// simulated holds pods this run has placed (as opposed to pods already
 	// running in the cluster). Preemption must never evict these, otherwise a
@@ -122,34 +128,43 @@ func New(ctx context.Context, client clientset.Interface, opts Options) (*Simula
 		return nil, err
 	}
 
+	defaultStorageClass, err := defaultStorageClassName(ctx, client)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Simulator{
-		ctx:             ctx,
-		framework:       f,
-		lister:          lister,
-		opts:            opts,
-		nodes:           nodes,
-		nodeOrder:       order,
-		scheduledPods:   pods,
-		pvcStore:        pvcInformer.GetStore(),
-		simulated:       map[*corev1.Pod]bool{},
-		priorityClasses: priorityClasses,
-		defaultPriority: defaultPriority,
+		ctx:                 ctx,
+		framework:           f,
+		lister:              lister,
+		opts:                opts,
+		nodes:               nodes,
+		nodeOrder:           order,
+		scheduledPods:       pods,
+		pvcStore:            pvcInformer.GetStore(),
+		defaultStorageClass: defaultStorageClass,
+		simulated:           map[*corev1.Pod]bool{},
+		priorityClasses:     priorityClasses,
+		defaultPriority:     defaultPriority,
 	}, nil
 }
 
 // Run executes the greedy cumulative packing simulation over the workloads in
-// input order and returns the aggregated result.
+// input order and returns the aggregated result: cluster capacity, total
+// requested resources, whether every replica fits, and rejection reasons.
 func (s *Simulator) Run(workloads []*input.Workload) (*Result, error) {
-	result := &Result{TotalNodes: len(s.nodes), AllSchedulable: true}
+	result := &Result{
+		NodeCount:   len(s.nodes),
+		Allocatable: corev1.ResourceList{},
+		Requested:   corev1.ResourceList{},
+		Reasons:     map[string]string{},
+		Schedulable: true,
+	}
 
 	for _, w := range workloads {
-		workloadResult := WorkloadResult{
-			Kind:              w.Kind,
-			Name:              w.Name,
-			Namespace:         w.Namespace,
-			Source:            w.Source,
-			ReplicasRequested: w.Replicas,
-		}
+		result.ReplicasRequested += int(w.Replicas)
+		addRequested(result.Requested, w)
+
 		for i := 0; i < int(w.Replicas); i++ {
 			pod, pvcs := w.Replica(i)
 			if err := s.injectPVCs(pvcs); err != nil {
@@ -163,8 +178,9 @@ func (s *Simulator) Run(workloads []*input.Workload) (*Result, error) {
 			if node == "" {
 				// Identical template against an unchanged-or-tighter snapshot: if
 				// this replica cannot be placed, no later replica of this workload
-				// can either, so stop and leave the rest unscheduled.
-				workloadResult.Replicas = append(workloadResult.Replicas, ReplicaResult{Ordinal: i, Reasons: reasons})
+				// can either, so stop and record why.
+				addReasons(result.Reasons, reasons)
+				result.Schedulable = false
 				break
 			}
 
@@ -175,21 +191,58 @@ func (s *Simulator) Run(workloads []*input.Workload) (*Result, error) {
 			s.scheduledPods = append(s.scheduledPods, pod)
 			s.simulated[pod] = true
 			s.refreshSnapshot()
-			workloadResult.Replicas = append(workloadResult.Replicas, ReplicaResult{
-				Ordinal:       i,
-				Fit:           true,
-				Node:          node,
-				ViaPreemption: viaPreempt,
-			})
-			workloadResult.ReplicasFit++
+			if viaPreempt {
+				result.UsedPreemption = true
+			}
+			result.ReplicasFit++
 		}
-		workloadResult.Schedulable = workloadResult.ReplicasFit == workloadResult.ReplicasRequested
-		if !workloadResult.Schedulable {
-			result.AllSchedulable = false
-		}
-		result.Workloads = append(result.Workloads, workloadResult)
 	}
+
+	result.Allocatable = s.allocatableFor(result.Requested)
 	return result, nil
+}
+
+// addRequested adds one workload's total requests (per-pod requests scaled by
+// its replica count) to the running total. Per-pod requests use the same
+// accounting the scheduler applies (init containers, sidecars, pod overhead).
+func addRequested(total corev1.ResourceList, w *input.Workload) {
+	pod, _ := w.Replica(0)
+	perPod := resource.PodRequests(pod, resource.PodResourcesOptions{})
+	for name, q := range perPod {
+		scaled := q.DeepCopy()
+		scaled.Mul(int64(w.Replicas))
+		if existing, ok := total[name]; ok {
+			existing.Add(scaled)
+			total[name] = existing
+		} else {
+			total[name] = scaled
+		}
+	}
+}
+
+// addReasons merges per-plugin rejection messages, keeping the first seen.
+func addReasons(total, reasons map[string]string) {
+	for plugin, msg := range reasons {
+		if _, ok := total[plugin]; !ok {
+			total[plugin] = msg
+		}
+	}
+}
+
+// allocatableFor sums allocatable capacity across all nodes for exactly the
+// given resources, so allocatable and requested share the same resource keys.
+func (s *Simulator) allocatableFor(requested corev1.ResourceList) corev1.ResourceList {
+	allocatable := corev1.ResourceList{}
+	for name := range requested {
+		total := apiresource.Quantity{}
+		for _, node := range s.nodes {
+			if q, ok := node.Status.Allocatable[name]; ok {
+				total.Add(q)
+			}
+		}
+		allocatable[name] = total
+	}
+	return allocatable
 }
 
 // tryPlace runs PreFilter once then Filter on each node in name order, returning
@@ -255,9 +308,14 @@ func (s *Simulator) refreshSnapshot() {
 }
 
 // injectPVCs adds synthesized PVCs (e.g. from StatefulSet volumeClaimTemplates)
-// to the PVC informer store so volume filter plugins can evaluate them.
+// to the PVC informer store so volume filter plugins can evaluate them. A PVC
+// that omits a storageClassName inherits the cluster default, mirroring the PVC
+// admission plugin so volume binding is evaluated as it would be in practice.
 func (s *Simulator) injectPVCs(pvcs []*corev1.PersistentVolumeClaim) error {
 	for _, pvc := range pvcs {
+		if pvc.Spec.StorageClassName == nil && s.defaultStorageClass != "" {
+			pvc.Spec.StorageClassName = &s.defaultStorageClass
+		}
 		if err := s.pvcStore.Add(pvc); err != nil {
 			return fmt.Errorf("injecting synthetic PVC %s/%s into informer store: %w", pvc.Namespace, pvc.Name, err)
 		}
@@ -354,4 +412,20 @@ func listPriorityClasses(ctx context.Context, client clientset.Interface) (map[s
 		}
 	}
 	return priorities, defaultPriority, nil
+}
+
+// defaultStorageClassName returns the name of the cluster's default
+// StorageClass, or "" if none is marked default.
+func defaultStorageClassName(ctx context.Context, client clientset.Interface) (string, error) {
+	list, err := client.StorageV1().StorageClasses().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return "", fmt.Errorf("listing storageclasses: %w", err)
+	}
+	for i := range list.Items {
+		sc := &list.Items[i]
+		if sc.Annotations["storageclass.kubernetes.io/is-default-class"] == "true" {
+			return sc.Name, nil
+		}
+	}
+	return "", nil
 }

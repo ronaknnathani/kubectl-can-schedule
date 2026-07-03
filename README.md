@@ -1,20 +1,27 @@
 # kubectl can-schedule
 
-A `kubectl` plugin that answers a simple question: **can these pods land on this
-cluster right now, and on how many nodes?**
+A `kubectl` plugin that answers a simple question: **can this workload land on
+the cluster right now, and if not, why?**
 
 It runs the **default scheduler's filter plugins** (the same PreFilter + Filter
 logic the real kube-scheduler uses) against a live snapshot of the cluster. It is
 not a scorer or an optimizer — it does not try to find the *best* node, it only
-reports how many replicas fit.
+reports whether the requested replicas fit.
 
 ```
-$ kubectl can-schedule --resource cpu=2 --resource memory=4Gi --replicas 8
+$ kubectl can-schedule --resource cpu=10 --replicas 6
 
-KIND   NAMESPACE  NAME   REPLICAS  FIT  SCHEDULABLE  SOURCE
-flags  default    probe  8         6    no           flags
+Cluster: 4 node(s)
 
-Verdict: NOT SCHEDULABLE — 6 of 8 replica(s) fit across 3 node(s); 0 of 1 workload(s) fully schedulable.
+RESOURCE  ALLOCATABLE  REQUESTED
+cpu       72           60
+
+Requested 6 replica(s); 3 fit.
+
+Result: NOT SCHEDULABLE — not all requested replicas fit.
+Reasons:
+  NodeResourcesFit       Insufficient cpu
+  TaintToleration        node(s) had untolerated taint(s)
 ```
 
 ## How it works
@@ -88,12 +95,14 @@ kubectl can-schedule \
 | `--resource <name>=<qty>` | Per-replica request; repeatable. Mutually exclusive with `-f`. |
 | `--replicas` | Replica count for flag-based input (invalid with `-f`). |
 | `--consider-preemption` | Also consider evicting lower-priority pods (see below). |
-| `-o, --output` | `table` (default), `json`, or `yaml`. |
-| `--verbose` | Print per-filter-plugin rejection reasons for unschedulable workloads. |
-| `--name` | Name for the synthetic flag-based workload. |
+| `--kubeconfig` | Path to the kubeconfig file (defaults to the standard loading rules). |
+| `--context` | Kubeconfig context to use (defaults to the current context). |
+| `-n, --namespace` | Namespace for manifests/pods that don't specify one. |
 
-Standard kubectl connection flags are supported: `--kubeconfig`, `--context`,
-`-n/--namespace`, etc. The current kubeconfig context is used by default.
+The output reports total cluster allocatable capacity, the total requested by the
+workload, whether the requested replicas fit, and — when they don't — the filter
+plugins that rejected them. The exit code is the machine-readable signal (see
+below).
 
 ### Preemption
 
@@ -122,9 +131,10 @@ pods; it only evaluates filters against a temporary in-memory snapshot.
 - **Preemption** considers pod priority only — PodDisruptionBudgets are not
   consulted — and evaluates filters, consistent with the rest of the tool.
 - **StatefulSet `volumeClaimTemplates`** are approximated by synthesizing the
-  per-ordinal PVCs (unbound) so volume filters can evaluate them; this models
-  `WaitForFirstConsumer` provisioning well but is not a guarantee that dynamic
-  provisioning will succeed at bind time.
+  per-ordinal PVCs so volume filters can evaluate them. A claim that omits a
+  `storageClassName` inherits the cluster's default StorageClass (mirroring PVC
+  admission); this models `WaitForFirstConsumer` provisioning well but is not a
+  guarantee that dynamic provisioning will succeed at bind time.
 - Pods are evaluated as if they use the **default scheduler**, regardless of
   `spec.schedulerName`.
 - The scheduler libraries are pinned to a specific Kubernetes version

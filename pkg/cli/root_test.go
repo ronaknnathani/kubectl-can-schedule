@@ -33,7 +33,6 @@ func TestValidationErrors(t *testing.T) {
 		{"both inputs", []string{"-f", "x.yaml", "--resource", "cpu=1"}, "mutually exclusive"},
 		{"no input", nil, "either -f/--filename"},
 		{"replicas with files", []string{"-f", "x.yaml", "--replicas", "3"}, "--replicas is not valid with -f"},
-		{"invalid output", []string{"--resource", "cpu=1", "-o", "xml"}, "invalid output format"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
