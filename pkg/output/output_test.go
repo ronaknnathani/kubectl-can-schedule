@@ -13,118 +13,163 @@ import (
 
 func TestRenderSchedulable(t *testing.T) {
 	res := &simulate.Result{
-		NodeCount: 3,
-		Allocatable: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("12"),
-			corev1.ResourceMemory: resource.MustParse("24Gi"),
-		},
-		Requested: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("6"),
-			corev1.ResourceMemory: resource.MustParse("6Gi"),
-		},
-		ReplicasRequested: 3,
-		ReplicasFit:       3,
-		Schedulable:       true,
+		NodeCount:   3,
+		Schedulable: true,
+		Workloads: []simulate.WorkloadResult{{
+			Label:         "Deployment/web",
+			Replicas:      3,
+			ReplicasFit:   3,
+			FeasibleNodes: 3,
+			Resources: []simulate.ResourceStatus{
+				{Name: corev1.ResourceCPU, Allocatable: resource.MustParse("12"), Allocated: resource.MustParse("1"), Requested: resource.MustParse("3"), Fit: simulate.ResourceOK},
+			},
+		}},
 	}
-	var buf bytes.Buffer
-	if err := Render(&buf, res); err != nil {
-		t.Fatal(err)
-	}
-	out := buf.String()
-	for _, want := range []string{"Cluster: 3 node(s)", "ALLOCATABLE", "REQUESTED", "cpu", "SCHEDULABLE", "3 replica(s); 3 fit"} {
+	out := renderString(t, res)
+	for _, want := range []string{"Cluster: 3 node(s)", "Deployment/web (3 replicas)", "RESOURCE", "ALLOCATABLE", "Feasible nodes: 3 of 3", "SCHEDULABLE"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\n%s", want, out)
 		}
 	}
 	if strings.Contains(out, "NOT SCHEDULABLE") {
-		t.Errorf("schedulable result should not say NOT SCHEDULABLE\n%s", out)
+		t.Errorf("schedulable output should not contain NOT SCHEDULABLE\n%s", out)
 	}
+	assertNoSemicolons(t, out)
 }
 
-func TestRenderNotSchedulableShowsReasons(t *testing.T) {
+func TestRenderAbsentResource(t *testing.T) {
 	res := &simulate.Result{
-		NodeCount:         3,
-		Allocatable:       corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("12")},
-		Requested:         corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("40")},
-		ReplicasRequested: 10,
-		ReplicasFit:       4,
-		Schedulable:       false,
-		Reasons: map[string]string{
-			"NodeResourcesFit": "Insufficient cpu",
-			"TaintToleration":  "node(s) had untolerated taint",
-		},
+		NodeCount: 3,
+		Workloads: []simulate.WorkloadResult{{
+			Label:         "workload",
+			Replicas:      2,
+			ReplicasFit:   0,
+			FeasibleNodes: 0,
+			Resources: []simulate.ResourceStatus{
+				{Name: "nvidia.com/gpu", Allocatable: resource.MustParse("0"), Allocated: resource.MustParse("0"), Requested: resource.MustParse("2"), Fit: simulate.ResourceAbsent},
+			},
+		}},
 	}
-	var buf bytes.Buffer
-	if err := Render(&buf, res); err != nil {
-		t.Fatal(err)
-	}
-	out := buf.String()
-	for _, want := range []string{"NOT SCHEDULABLE", "Reasons:", "NodeResourcesFit", "Insufficient cpu", "TaintToleration", "10 replica(s); 4 fit"} {
+	out := renderString(t, res)
+	for _, want := range []string{"NOT PRESENT", "NOT SCHEDULABLE", `no node provides resource type "nvidia.com/gpu"`, "Feasible nodes: 0 of 3"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\n%s", want, out)
 		}
 	}
+	assertNoSemicolons(t, out)
 }
 
-func TestRenderPreemptionNote(t *testing.T) {
+func TestRenderPartialWithPackingReason(t *testing.T) {
 	res := &simulate.Result{
-		NodeCount:         1,
-		Allocatable:       corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-		Requested:         corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-		ReplicasRequested: 1,
-		ReplicasFit:       1,
-		Schedulable:       true,
-		UsedPreemption:    true,
+		NodeCount: 4,
+		Workloads: []simulate.WorkloadResult{{
+			Label:         "workload",
+			Replicas:      6,
+			ReplicasFit:   3,
+			FeasibleNodes: 3,
+			Resources: []simulate.ResourceStatus{
+				{Name: corev1.ResourceCPU, Allocatable: resource.MustParse("72"), Allocated: resource.MustParse("1"), Requested: resource.MustParse("60"), Fit: simulate.ResourceOK},
+			},
+		}},
 	}
-	var buf bytes.Buffer
-	if err := Render(&buf, res); err != nil {
+	out := renderString(t, res)
+	for _, want := range []string{"PARTIAL", "3 of 6", "cluster capacity is exhausted after 3 replicas"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n%s", want, out)
+		}
+	}
+	assertNoSemicolons(t, out)
+}
+
+func TestRenderInsufficientResource(t *testing.T) {
+	res := &simulate.Result{
+		NodeCount: 1,
+		Workloads: []simulate.WorkloadResult{{
+			Label:       "workload",
+			Replicas:    1,
+			ReplicasFit: 0,
+			Resources: []simulate.ResourceStatus{
+				{Name: corev1.ResourceCPU, Allocatable: resource.MustParse("4"), Allocated: resource.MustParse("0"), Requested: resource.MustParse("100"), Fit: simulate.ResourceInsufficient},
+			},
+		}},
+	}
+	out := renderString(t, res)
+	for _, want := range []string{"INSUFFICIENT", "not enough cpu", "100", "allocatable"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n%s", want, out)
+		}
+	}
+	assertNoSemicolons(t, out)
+}
+
+func TestRenderColorEmitsAnsiOnlyWhenEnabled(t *testing.T) {
+	res := &simulate.Result{
+		NodeCount:   1,
+		Schedulable: true,
+		Workloads: []simulate.WorkloadResult{{
+			Label: "workload", Replicas: 1, ReplicasFit: 1, FeasibleNodes: 1,
+			Resources: []simulate.ResourceStatus{
+				{Name: corev1.ResourceCPU, Allocatable: resource.MustParse("4"), Requested: resource.MustParse("1"), Fit: simulate.ResourceOK},
+			},
+		}},
+	}
+	var colored bytes.Buffer
+	if err := Render(&colored, res, true); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(buf.String(), "preempting lower-priority pods") {
-		t.Errorf("expected preemption note\n%s", buf.String())
+	if !strings.Contains(colored.String(), "\x1b[38;5;") {
+		t.Error("expected ANSI color codes when useColor=true")
+	}
+	if strings.Contains(renderString(t, res), "\x1b[") {
+		t.Error("did not expect ANSI codes when useColor=false")
 	}
 }
 
 func TestFormatQuantity(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-	}{
+	cases := []struct{ in, want string }{
 		{"3Gi", "3Gi"},
 		{"32497696Ki", "30.99Gi"},
 		{"512Mi", "512Mi"},
-		{"2000", "2000"}, // cpu cores, not "2k"
-		{"500m", "0.5"},  // half a core
-		{"1", "1"},       // gpu count
+		{"2000", "2000"},
+		{"500m", "0.5"},
+		{"1", "1"},
 	}
 	for _, tc := range cases {
-		got := formatQuantity(resource.MustParse(tc.in))
-		if got != tc.want {
+		if got := formatQuantity(resource.MustParse(tc.in)); got != tc.want {
 			t.Errorf("formatQuantity(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
 
-func TestResourceOrdering(t *testing.T) {
-	requested := corev1.ResourceList{
-		"nvidia.com/gpu":                resource.MustParse("1"),
-		corev1.ResourceMemory:           resource.MustParse("1Gi"),
-		corev1.ResourceCPU:              resource.MustParse("1"),
-		corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
+func TestWithPercent(t *testing.T) {
+	cases := []struct {
+		value, allocatable, want string
+	}{
+		{"20", "72", "20 (28%)"},
+		{"2Mi", "30Gi", "2Mi (<1%)"},
+		{"0", "10", "0 (0%)"},
+		{"2", "0", "2"}, // no allocatable => no percentage
 	}
-	got := resourceNames(requested)
-	want := []corev1.ResourceName{
-		corev1.ResourceCPU,
-		corev1.ResourceMemory,
-		corev1.ResourceEphemeralStorage,
-		"nvidia.com/gpu",
-	}
-	if len(got) != len(want) {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("resource order: got %v, want %v", got, want)
+	for _, tc := range cases {
+		got := withPercent(resource.MustParse(tc.value), resource.MustParse(tc.allocatable))
+		if got != tc.want {
+			t.Errorf("withPercent(%q,%q) = %q, want %q", tc.value, tc.allocatable, got, tc.want)
 		}
+	}
+}
+
+func renderString(t *testing.T, res *simulate.Result) string {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := Render(&buf, res, false); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
+}
+
+func assertNoSemicolons(t *testing.T, out string) {
+	t.Helper()
+	if strings.Contains(out, ";") {
+		t.Errorf("output must not contain semicolons\n%s", out)
 	}
 }

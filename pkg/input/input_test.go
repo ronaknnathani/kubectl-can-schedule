@@ -127,13 +127,32 @@ func TestParseResourceFlags(t *testing.T) {
 		t.Errorf("gpu = %v", rl["nvidia.com/gpu"])
 	}
 
-	for _, bad := range [][]string{{"cpu"}, {"cpu="}, {"=2"}, {"cpu=notaquantity"}, {"cpu=-1"}, {}} {
+	for _, bad := range [][]string{{"cpu"}, {"cpu="}, {"=2"}, {"cpu=notaquantity"}, {"cpu=-1"}, {"gpu=1"}, {}} {
 		if _, err := ParseResourceFlags(bad); err == nil {
 			t.Errorf("ParseResourceFlags(%v) expected error", bad)
 		}
 	}
 	if _, err := ParseResourceFlags([]string{"cpu=1", "cpu=2"}); err == nil {
 		t.Error("duplicate resource expected error")
+	}
+	// A fully-qualified extended resource is valid.
+	if _, err := ParseResourceFlags([]string{"nvidia.com/gpu=1"}); err != nil {
+		t.Errorf("nvidia.com/gpu should be valid: %v", err)
+	}
+}
+
+func TestInvalidResourceNameInManifest(t *testing.T) {
+	// "gpu" is unqualified and not a standard resource; the API would reject it
+	// and the scheduler silently ignores it, so parsing must reject it.
+	manifest := `
+apiVersion: v1
+kind: Pod
+metadata: {name: p, namespace: default}
+spec:
+  containers: [{name: c, image: busybox, resources: {requests: {gpu: "1"}}}]
+`
+	if _, err := ParseFiles([]string{"-"}, "default", strings.NewReader(manifest)); err == nil {
+		t.Error("expected error for unqualified resource name gpu in manifest")
 	}
 }
 

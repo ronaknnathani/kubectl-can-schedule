@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hungry
+  namespace: default
+spec:
+  replicas: 10
+  selector:
+    matchLabels:
+      app: hungry
+  template:
+    metadata:
+      labels:
+        app: hungry
+    spec:
+      containers:
+      - name: app
+        image: nginx
+        resources:
+          requests:
+            cpu: "16"

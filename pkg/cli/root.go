@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 
@@ -123,13 +124,20 @@ func (o *options) run(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	if err := output.Render(cmd.OutOrStdout(), result); err != nil {
+	if err := output.Render(cmd.OutOrStdout(), result, o.useColor(cmd)); err != nil {
 		return err
 	}
 	if !result.Schedulable {
 		o.exitCode = 1
 	}
 	return nil
+}
+
+// useColor reports whether colored output should be emitted: only when writing
+// to a real terminal (not when piped or redirected).
+func (o *options) useColor(cmd *cobra.Command) bool {
+	f, ok := cmd.OutOrStdout().(*os.File)
+	return ok && term.IsTerminal(int(f.Fd()))
 }
 
 // clientConfig builds a kubeconfig loader honoring --kubeconfig, --context, and

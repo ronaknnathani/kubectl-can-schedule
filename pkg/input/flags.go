@@ -38,6 +38,10 @@ func ParseResourceFlags(pairs []string) (corev1.ResourceList, error) {
 			continue
 		}
 		name := corev1.ResourceName(key)
+		if err := validateResourceName(name); err != nil {
+			errs = append(errs, err)
+			continue
+		}
 		if _, exists := requests[name]; exists {
 			errs = append(errs, fmt.Errorf("resource %q specified more than once", key))
 			continue
@@ -70,6 +74,7 @@ func FromFlags(requests corev1.ResourceList, replicas int32, namespace string) *
 		},
 	}
 	return &Workload{
+		Kind:      "flags",
 		Name:      name,
 		Namespace: namespace,
 		Replicas:  replicas,

@@ -9,16 +9,18 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
-	apiresource "k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/component-helpers/resource"
+	resourcehelper "k8s.io/component-helpers/resource"
 	helpers "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/names"
 
 	"github.com/ronaknnathani/kubectl-can-schedule/pkg/input"
 	"github.com/ronaknnathani/kubectl-can-schedule/pkg/scheduling"
@@ -32,31 +34,50 @@ type Options struct {
 	ConsiderPreemption bool
 }
 
-// Result is the outcome of a schedulability check: what the cluster can offer,
-// what the workload asked for, whether it fits, and — when it does not — why.
-type Result struct {
-	// NodeCount is the number of nodes in the cluster.
-	NodeCount int
-	// Allocatable is the total allocatable capacity summed across all nodes,
-	// restricted to the resources the workload actually requests.
-	Allocatable corev1.ResourceList
-	// Requested is the total resources requested across every replica of every
-	// input workload.
-	Requested corev1.ResourceList
+// ResourceFit classifies how a single requested resource fares against the
+// cluster's capacity.
+type ResourceFit int
 
-	// ReplicasRequested and ReplicasFit report how many pods were asked for and
-	// how many the simulation could place.
-	ReplicasRequested int
-	ReplicasFit       int
-	// Schedulable is true when every requested replica was placed.
-	Schedulable bool
-	// UsedPreemption is true when at least one replica only fit by preempting
-	// lower-priority pods.
+const (
+	// ResourceOK means the cluster has enough unallocated capacity of this resource.
+	ResourceOK ResourceFit = iota
+	// ResourceInsufficient means some node advertises this resource but the
+	// cluster-wide unallocated capacity is less than requested.
+	ResourceInsufficient
+	// ResourceAbsent means no node advertises this resource at all.
+	ResourceAbsent
+)
+
+// ResourceStatus is the per-resource view of demand vs cluster capacity.
+type ResourceStatus struct {
+	Name        corev1.ResourceName
+	Allocatable resource.Quantity // total across all nodes
+	Allocated   resource.Quantity // requested by pods already running in the cluster
+	Requested   resource.Quantity // this workload's total (per-pod x replicas)
+	Fit         ResourceFit
+}
+
+// WorkloadResult is the outcome for a single input object.
+type WorkloadResult struct {
+	Label          string           // e.g. "Deployment/web" or "workload"
+	Replicas       int              // requested
+	ReplicasFit    int              // placed by the simulation
+	FeasibleNodes  int              // nodes a single replica passes all filters on
+	Resources      []ResourceStatus // one per resource the workload requests
 	UsedPreemption bool
+	// FilterReasons maps non-resource filter plugins that rejected nodes to an
+	// example message (resource shortfalls are conveyed by Resources instead).
+	FilterReasons map[string]string
+}
 
-	// Reasons maps each filter plugin that rejected the workload to an example
-	// message, explaining why replicas could not be placed. Empty when Schedulable.
-	Reasons map[string]string
+// Schedulable reports whether every requested replica of this workload fit.
+func (w WorkloadResult) Schedulable() bool { return w.ReplicasFit == w.Replicas }
+
+// Result is the outcome of a schedulability check across all input workloads.
+type Result struct {
+	NodeCount   int
+	Workloads   []WorkloadResult
+	Schedulable bool // every workload fully fits
 }
 
 // Simulator holds the constructed framework and the mutable cluster view.
@@ -149,100 +170,198 @@ func New(ctx context.Context, client clientset.Interface, opts Options) (*Simula
 	}, nil
 }
 
-// Run executes the greedy cumulative packing simulation over the workloads in
-// input order and returns the aggregated result: cluster capacity, total
-// requested resources, whether every replica fits, and rejection reasons.
+// Run evaluates each input workload against the cluster in order (cumulative:
+// replicas placed for earlier workloads consume capacity seen by later ones) and
+// returns a per-workload report of capacity, demand, feasibility, and reasons.
 func (s *Simulator) Run(workloads []*input.Workload) (*Result, error) {
-	result := &Result{
-		NodeCount:   len(s.nodes),
-		Allocatable: corev1.ResourceList{},
-		Requested:   corev1.ResourceList{},
-		Reasons:     map[string]string{},
-		Schedulable: true,
-	}
+	result := &Result{NodeCount: len(s.nodes), Schedulable: true}
+	allocated := s.allocatedByResource()
 
 	for _, w := range workloads {
-		result.ReplicasRequested += int(w.Replicas)
-		addRequested(result.Requested, w)
-
-		for i := 0; i < int(w.Replicas); i++ {
-			pod, pvcs := w.Replica(i)
-			if err := s.injectPVCs(pvcs); err != nil {
-				return nil, err
-			}
-
-			node, viaPreempt, victims, reasons, err := s.tryPlace(pod)
-			if err != nil {
-				return nil, err
-			}
-			if node == "" {
-				// Identical template against an unchanged-or-tighter snapshot: if
-				// this replica cannot be placed, no later replica of this workload
-				// can either, so stop and record why.
-				addReasons(result.Reasons, reasons)
-				result.Schedulable = false
-				break
-			}
-
-			pod.Spec.NodeName = node
-			if len(victims) > 0 {
-				s.evict(victims)
-			}
-			s.scheduledPods = append(s.scheduledPods, pod)
-			s.simulated[pod] = true
-			s.refreshSnapshot()
-			if viaPreempt {
-				result.UsedPreemption = true
-			}
-			result.ReplicasFit++
+		wr, err := s.runWorkload(w, allocated)
+		if err != nil {
+			return nil, err
 		}
+		if !wr.Schedulable() {
+			result.Schedulable = false
+		}
+		result.Workloads = append(result.Workloads, *wr)
 	}
-
-	result.Allocatable = s.allocatableFor(result.Requested)
 	return result, nil
 }
 
-// addRequested adds one workload's total requests (per-pod requests scaled by
-// its replica count) to the running total. Per-pod requests use the same
-// accounting the scheduler applies (init containers, sidecars, pod overhead).
-func addRequested(total corev1.ResourceList, w *input.Workload) {
+func (s *Simulator) runWorkload(w *input.Workload, allocated corev1.ResourceList) (*WorkloadResult, error) {
+	wr := &WorkloadResult{
+		Label:         w.Label(),
+		Replicas:      int(w.Replicas),
+		FilterReasons: map[string]string{},
+	}
+
+	// Feasibility: how many nodes a single replica passes all filters on, plus
+	// the non-resource filter reasons for the nodes it does not.
+	probe, probePVCs := w.Replica(0)
+	if err := s.injectPVCs(probePVCs); err != nil {
+		return nil, err
+	}
+	feasible, filterReasons, err := s.feasibility(probe)
+	if err != nil {
+		return nil, err
+	}
+	wr.FeasibleNodes = feasible
+	wr.FilterReasons = filterReasons
+
+	// Per-resource demand vs cluster capacity.
+	requested := s.requestedByWorkload(w)
+	wr.Resources = s.resourceStatuses(requested, allocated)
+
+	// Greedy placement of every replica.
+	for i := 0; i < wr.Replicas; i++ {
+		pod, pvcs := w.Replica(i)
+		if err := s.injectPVCs(pvcs); err != nil {
+			return nil, err
+		}
+		node, viaPreempt, victims, _, err := s.tryPlace(pod)
+		if err != nil {
+			return nil, err
+		}
+		if node == "" {
+			// Identical template against an unchanged-or-tighter snapshot: if this
+			// replica cannot be placed, no later replica of this workload can either.
+			break
+		}
+		pod.Spec.NodeName = node
+		if len(victims) > 0 {
+			s.evict(victims)
+		}
+		s.scheduledPods = append(s.scheduledPods, pod)
+		s.simulated[pod] = true
+		s.refreshSnapshot()
+		if viaPreempt {
+			wr.UsedPreemption = true
+		}
+		wr.ReplicasFit++
+	}
+	return wr, nil
+}
+
+// feasibility runs PreFilter once then Filter on every node for a single pod,
+// returning how many nodes pass and an example message per non-resource filter
+// plugin that rejected nodes. It places nothing.
+func (s *Simulator) feasibility(pod *corev1.Pod) (int, map[string]string, error) {
+	if err := s.resolvePriority(pod); err != nil {
+		return 0, nil, err
+	}
+	reasons := map[string]string{}
+	state := framework.NewCycleState()
+	preRes, preStatus, preRejectedBy := s.framework.RunPreFilterPlugins(s.ctx, state, pod)
+	if !preStatus.IsSuccess() {
+		reasons[preStatus.Plugin()] = sanitizeReason(preStatus.Message())
+		return 0, reasons, nil
+	}
+
+	feasible := 0
+	for _, name := range s.nodeOrder {
+		if !preRes.AllNodes() && !preRes.NodeNames.Has(name) {
+			continue // narrowed out by a PreFilter plugin (e.g. node affinity)
+		}
+		nodeInfo, err := s.lister.NodeInfos().Get(name)
+		if err != nil {
+			continue
+		}
+		status := s.framework.RunFilterPlugins(s.ctx, state, pod, nodeInfo)
+		if status.IsSuccess() {
+			feasible++
+			continue
+		}
+		if plugin := status.Plugin(); plugin != names.NodeResourcesFit {
+			reasons[plugin] = sanitizeReason(status.Message())
+		}
+	}
+	// A PreFilter plugin that narrowed the candidate set to nothing (e.g. a
+	// nodeSelector matching no node) leaves no per-node reason, so surface it.
+	if feasible == 0 && len(reasons) == 0 {
+		for plugin := range preRejectedBy {
+			reasons[plugin] = "no node satisfied this requirement"
+		}
+	}
+	return feasible, reasons, nil
+}
+
+// requestedByWorkload returns the total resources requested across all replicas
+// (per-pod requests, using the scheduler's accounting, scaled by replica count).
+func (s *Simulator) requestedByWorkload(w *input.Workload) corev1.ResourceList {
 	pod, _ := w.Replica(0)
-	perPod := resource.PodRequests(pod, resource.PodResourcesOptions{})
-	for name, q := range perPod {
+	total := corev1.ResourceList{}
+	for name, q := range resourcehelper.PodRequests(pod, resourcehelper.PodResourcesOptions{}) {
 		scaled := q.DeepCopy()
 		scaled.Mul(int64(w.Replicas))
-		if existing, ok := total[name]; ok {
-			existing.Add(scaled)
-			total[name] = existing
-		} else {
-			total[name] = scaled
-		}
+		total[name] = scaled
 	}
+	return total
 }
 
-// addReasons merges per-plugin rejection messages, keeping the first seen.
-func addReasons(total, reasons map[string]string) {
-	for plugin, msg := range reasons {
-		if _, ok := total[plugin]; !ok {
-			total[plugin] = msg
-		}
+// resourceStatuses classifies each requested resource against cluster capacity.
+func (s *Simulator) resourceStatuses(requested, allocated corev1.ResourceList) []ResourceStatus {
+	var statuses []ResourceStatus
+	for name, req := range requested {
+		allocatable := s.allocatableOf(name)
+		alloc := allocated[name]
+		statuses = append(statuses, ResourceStatus{
+			Name:        name,
+			Allocatable: allocatable,
+			Allocated:   alloc,
+			Requested:   req,
+			Fit:         classifyResource(allocatable, alloc, req),
+		})
 	}
+	sort.Slice(statuses, func(i, j int) bool { return statuses[i].Name < statuses[j].Name })
+	return statuses
 }
 
-// allocatableFor sums allocatable capacity across all nodes for exactly the
-// given resources, so allocatable and requested share the same resource keys.
-func (s *Simulator) allocatableFor(requested corev1.ResourceList) corev1.ResourceList {
-	allocatable := corev1.ResourceList{}
-	for name := range requested {
-		total := apiresource.Quantity{}
-		for _, node := range s.nodes {
-			if q, ok := node.Status.Allocatable[name]; ok {
-				total.Add(q)
+func classifyResource(allocatable, allocated, requested resource.Quantity) ResourceFit {
+	if allocatable.IsZero() {
+		return ResourceAbsent
+	}
+	free := allocatable.DeepCopy()
+	free.Sub(allocated)
+	if free.Cmp(requested) < 0 {
+		return ResourceInsufficient
+	}
+	return ResourceOK
+}
+
+// allocatableOf sums a single resource's allocatable capacity across all nodes.
+func (s *Simulator) allocatableOf(name corev1.ResourceName) resource.Quantity {
+	total := resource.Quantity{}
+	for _, node := range s.nodes {
+		if q, ok := node.Status.Allocatable[name]; ok {
+			total.Add(q)
+		}
+	}
+	return total
+}
+
+// allocatedByResource sums the requests of all pods already running in the
+// cluster (the real, pre-existing pods), giving current cluster utilization.
+func (s *Simulator) allocatedByResource() corev1.ResourceList {
+	total := corev1.ResourceList{}
+	for _, pod := range s.scheduledPods {
+		for name, q := range resourcehelper.PodRequests(pod, resourcehelper.PodResourcesOptions{}) {
+			if existing, ok := total[name]; ok {
+				existing.Add(q)
+				total[name] = existing
+			} else {
+				total[name] = q.DeepCopy()
 			}
 		}
-		allocatable[name] = total
 	}
-	return allocatable
+	return total
+}
+
+// sanitizeReason removes semicolons from scheduler messages so output never
+// contains them.
+func sanitizeReason(msg string) string {
+	return strings.ReplaceAll(msg, ";", ",")
 }
 
 // tryPlace runs PreFilter once then Filter on each node in name order, returning

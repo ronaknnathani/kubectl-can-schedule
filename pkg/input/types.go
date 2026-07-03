@@ -17,6 +17,7 @@ import (
 
 // Workload is a single schedulable input object expanded to a replica count.
 type Workload struct {
+	Kind      string // Pod | Deployment | StatefulSet | flags
 	Name      string
 	Namespace string
 	Replicas  int32
@@ -30,6 +31,15 @@ type Workload struct {
 	// replica, a per-ordinal PVC is synthesized and a corresponding volume is
 	// injected into the pod, mirroring the StatefulSet controller.
 	volumeClaimTemplates []corev1.PersistentVolumeClaim
+}
+
+// Label is a concise identifier for output, e.g. "Deployment/web". A synthetic
+// flag-based workload has no meaningful name and is shown as just "workload".
+func (w *Workload) Label() string {
+	if w.Kind == "flags" {
+		return "workload"
+	}
+	return w.Kind + "/" + w.Name
 }
 
 // Replica builds the pod (and any synthetic PVCs it references) for the given

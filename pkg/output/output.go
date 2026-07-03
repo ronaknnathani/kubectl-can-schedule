@@ -1,6 +1,6 @@
-// Package output renders a schedulability Result as a human-readable report:
-// cluster capacity, requested resources, the fit verdict, and — when a workload
-// does not fit — the filter-plugin reasons why.
+// Package output renders a schedulability Result as a bordered, colorized
+// report: cluster capacity, per-resource demand vs capacity, feasible nodes, the
+// fit verdict, and — when a workload does not fit — the reasons why.
 package output
 
 import (
@@ -10,41 +10,40 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 
-	corev1 "k8s.io/api/core/v1"
+	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/ronaknnathani/kubectl-can-schedule/pkg/simulate"
 )
 
-// Render writes a report of res to w.
-func Render(w io.Writer, res *simulate.Result) error {
+// Pastel 256-color foreground codes, chosen to read well on dark terminals.
+const (
+	colorGreen = 151 // fits / ok
+	colorAmber = 222 // partial / insufficient
+	colorRed   = 210 // does not fit / absent
+	colorDim   = 245 // secondary text
+)
+
+// Render writes a report of res to w. Colors are emitted only when useColor is true.
+func Render(w io.Writer, res *simulate.Result, useColor bool) error {
+	p := painter{useColor: useColor}
 	var buf bytes.Buffer
 
-	fmt.Fprintf(&buf, "Cluster: %d node(s)\n\n", res.NodeCount)
+	fmt.Fprintf(&buf, "Cluster: %d node(s)\n", res.NodeCount)
 
-	tw := tabwriter.NewWriter(&buf, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "RESOURCE\tALLOCATABLE\tREQUESTED")
-	for _, name := range resourceNames(res.Requested) {
-		allocatable := res.Allocatable[name]
-		requested := res.Requested[name]
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", name, formatQuantity(allocatable), formatQuantity(requested))
+	for _, wl := range res.Workloads {
+		buf.WriteString("\n")
+		renderWorkload(&buf, wl, res.NodeCount, p)
 	}
-	tw.Flush()
 
-	fmt.Fprintf(&buf, "\nRequested %d replica(s); %d fit.\n", res.ReplicasRequested, res.ReplicasFit)
-
-	if res.Schedulable {
-		fmt.Fprintln(&buf, "\nResult: SCHEDULABLE — all requested replicas fit.")
-		if res.UsedPreemption {
-			fmt.Fprintln(&buf, "Note: some replicas fit only by preempting lower-priority pods.")
-		}
-	} else {
-		fmt.Fprintln(&buf, "\nResult: NOT SCHEDULABLE — not all requested replicas fit.")
-		fmt.Fprintln(&buf, "Reasons:")
-		for _, plugin := range sortedKeys(res.Reasons) {
-			fmt.Fprintf(&buf, "  %-22s %s\n", plugin, res.Reasons[plugin])
+	if len(res.Workloads) > 1 {
+		buf.WriteString("\n")
+		if res.Schedulable {
+			fmt.Fprintln(&buf, p.paint(colorGreen, "Overall: SCHEDULABLE — every workload fits."))
+		} else {
+			fmt.Fprintln(&buf, p.paint(colorRed, "Overall: NOT SCHEDULABLE — at least one workload does not fit."))
 		}
 	}
 
@@ -54,36 +53,125 @@ func Render(w io.Writer, res *simulate.Result) error {
 	return nil
 }
 
-// resourceNames returns the requested resource names in a stable display order:
-// cpu, memory, and ephemeral-storage first (when requested), then the rest
-// sorted alphabetically.
-func resourceNames(requested corev1.ResourceList) []corev1.ResourceName {
-	priority := []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory, corev1.ResourceEphemeralStorage}
-	var ordered []corev1.ResourceName
-	seen := map[corev1.ResourceName]bool{}
-	for _, name := range priority {
-		if _, ok := requested[name]; ok {
-			ordered = append(ordered, name)
-			seen[name] = true
-		}
+func renderWorkload(buf *bytes.Buffer, wl simulate.WorkloadResult, nodeCount int, p painter) {
+	fmt.Fprintf(buf, "%s (%s)\n", wl.Label, countNoun(wl.Replicas, "replica"))
+
+	table := tablewriter.NewTable(buf, tablewriter.WithSymbols(tw.NewSymbols(tw.StyleRounded)))
+	table.Header([]string{"RESOURCE", "ALLOCATABLE", "ALLOCATED", "REQUESTED", "STATUS"})
+	for _, r := range wl.Resources {
+		_ = table.Append([]string{
+			string(r.Name),
+			formatQuantity(r.Allocatable),
+			withPercent(r.Allocated, r.Allocatable),
+			withPercent(r.Requested, r.Allocatable),
+			p.paint(resourceColor(r.Fit), resourceText(r.Fit)),
+		})
 	}
-	var rest []corev1.ResourceName
-	for name := range requested {
-		if !seen[name] {
-			rest = append(rest, name)
-		}
+	_ = table.Render()
+
+	fmt.Fprintf(buf, "Feasible nodes: %d of %d\n", wl.FeasibleNodes, nodeCount)
+	fmt.Fprintln(buf, verdictLine(wl, p))
+	for _, reason := range workloadReasons(wl) {
+		fmt.Fprintf(buf, "  - %s\n", reason)
 	}
-	sort.Slice(rest, func(i, j int) bool { return rest[i] < rest[j] })
-	return append(ordered, rest...)
 }
 
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
+func verdictLine(wl simulate.WorkloadResult, p painter) string {
+	switch {
+	case wl.Schedulable():
+		msg := fmt.Sprintf("SCHEDULABLE — %d of %d replicas fit", wl.ReplicasFit, wl.Replicas)
+		if wl.UsedPreemption {
+			msg += " (some only by preempting lower-priority pods)"
+		}
+		return p.paint(colorGreen, "Result: "+msg)
+	case wl.ReplicasFit == 0:
+		return p.paint(colorRed, fmt.Sprintf("Result: NOT SCHEDULABLE — 0 of %d replicas fit", wl.Replicas))
+	default:
+		return p.paint(colorAmber, fmt.Sprintf("Result: PARTIAL — %d of %d replicas fit", wl.ReplicasFit, wl.Replicas))
 	}
-	sort.Strings(keys)
-	return keys
+}
+
+// countNoun renders a count with a singular/plural noun, e.g. "1 replica" or
+// "3 replicas".
+func countNoun(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("1 %s", noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// workloadReasons explains, in priority order, why a workload does not fully fit.
+func workloadReasons(wl simulate.WorkloadResult) []string {
+	if wl.Schedulable() {
+		return nil
+	}
+	var reasons []string
+	resourceShortfall := false
+	for _, r := range wl.Resources {
+		switch r.Fit {
+		case simulate.ResourceAbsent:
+			resourceShortfall = true
+			reasons = append(reasons, fmt.Sprintf("no node provides resource type %q", r.Name))
+		case simulate.ResourceInsufficient:
+			resourceShortfall = true
+			reasons = append(reasons, fmt.Sprintf("not enough %s (requested %s, %s allocatable, %s already in use)",
+				r.Name, formatQuantity(r.Requested), formatQuantity(r.Allocatable), formatQuantity(r.Allocated)))
+		}
+	}
+	for _, plugin := range sortedKeys(wl.FilterReasons) {
+		reasons = append(reasons, fmt.Sprintf("filter %s rejected nodes: %s", plugin, wl.FilterReasons[plugin]))
+	}
+	// Some replicas fit but not all, and no single resource is cluster-wide short:
+	// the feasible nodes ran out of room as replicas were packed onto them.
+	if wl.ReplicasFit > 0 && !resourceShortfall {
+		reasons = append(reasons, fmt.Sprintf("cluster capacity is exhausted after %d replicas once packed across feasible nodes", wl.ReplicasFit))
+	}
+	// Nothing fit and nothing above explained it (e.g. a selector matched no node).
+	if len(reasons) == 0 {
+		reasons = append(reasons, "no node satisfies the workload's scheduling requirements")
+	}
+	return reasons
+}
+
+func resourceText(f simulate.ResourceFit) string {
+	switch f {
+	case simulate.ResourceAbsent:
+		return "NOT PRESENT"
+	case simulate.ResourceInsufficient:
+		return "INSUFFICIENT"
+	default:
+		return "OK"
+	}
+}
+
+func resourceColor(f simulate.ResourceFit) int {
+	switch f {
+	case simulate.ResourceAbsent:
+		return colorRed
+	case simulate.ResourceInsufficient:
+		return colorAmber
+	default:
+		return colorGreen
+	}
+}
+
+// withPercent renders "value (p% of allocatable)"; the percent is omitted when
+// there is no allocatable capacity to compare against.
+func withPercent(value, allocatable resource.Quantity) string {
+	v := formatQuantity(value)
+	whole := allocatable.AsApproximateFloat64()
+	if whole == 0 {
+		return v
+	}
+	pct := value.AsApproximateFloat64() / whole * 100
+	switch {
+	case pct == 0:
+		return fmt.Sprintf("%s (0%%)", v)
+	case pct < 1:
+		return fmt.Sprintf("%s (<1%%)", v)
+	default:
+		return fmt.Sprintf("%s (%.0f%%)", v, pct)
+	}
 }
 
 // formatQuantity renders a resource quantity for human comparison. Binary
@@ -97,8 +185,6 @@ func formatQuantity(q resource.Quantity) string {
 	return trimDecimalZeros(q.AsDec().String())
 }
 
-// humanBinary formats a byte count using binary (power-of-1024) units, keeping
-// up to two decimal places and trimming trailing zeros.
 func humanBinary(bytes int64) string {
 	const unit = 1024
 	if bytes < unit {
@@ -114,12 +200,29 @@ func humanBinary(bytes int64) string {
 	return trimDecimalZeros(strconv.FormatFloat(value, 'f', 2, 64)) + units[i]
 }
 
-// trimDecimalZeros removes trailing fractional zeros (and a dangling decimal
-// point) from a decimal string: "0.500" -> "0.5", "3.00" -> "3", "2000" -> "2000".
 func trimDecimalZeros(s string) string {
 	if !strings.Contains(s, ".") {
 		return s
 	}
 	s = strings.TrimRight(s, "0")
 	return strings.TrimRight(s, ".")
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// painter applies ANSI color when enabled, and is a no-op otherwise.
+type painter struct{ useColor bool }
+
+func (p painter) paint(code int, s string) string {
+	if !p.useColor {
+		return s
+	}
+	return fmt.Sprintf("\x1b[38;5;%dm%s\x1b[0m", code, s)
 }

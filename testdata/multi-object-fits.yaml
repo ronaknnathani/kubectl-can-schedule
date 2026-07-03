@@ -1,0 +1,37 @@
+# Two objects in one manifest that both fit within cluster capacity.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+      - name: api
+        image: nginx
+        resources:
+          requests:
+            cpu: "1"
+            memory: 256Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: worker
+  namespace: default
+spec:
+  containers:
+  - name: worker
+    image: busybox
+    resources:
+      requests:
+        cpu: "2"
+        memory: 512Mi

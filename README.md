@@ -9,20 +9,31 @@ not a scorer or an optimizer — it does not try to find the *best* node, it onl
 reports whether the requested replicas fit.
 
 ```
-$ kubectl can-schedule --resource cpu=10 --replicas 6
+$ kubectl can-schedule --resource cpu=2 --resource nvidia.com/gpu=1 --replicas 3
 
 Cluster: 4 node(s)
 
-RESOURCE  ALLOCATABLE  REQUESTED
-cpu       72           60
-
-Requested 6 replica(s); 3 fit.
-
-Result: NOT SCHEDULABLE — not all requested replicas fit.
-Reasons:
-  NodeResourcesFit       Insufficient cpu
-  TaintToleration        node(s) had untolerated taint(s)
+workload (3 replicas)
+╭────────────────┬─────────────┬───────────┬───────────┬─────────────╮
+│    RESOURCE    │ ALLOCATABLE │ ALLOCATED │ REQUESTED │   STATUS    │
+├────────────────┼─────────────┼───────────┼───────────┼─────────────┤
+│ cpu            │ 72          │ 1.25 (2%) │ 6 (8%)    │ OK          │
+│ nvidia.com/gpu │ 0           │ 0         │ 3         │ NOT PRESENT │
+╰────────────────┴─────────────┴───────────┴───────────┴─────────────╯
+Feasible nodes: 0 of 4
+Result: NOT SCHEDULABLE — 0 of 3 replicas fit
+  - no node provides resource type "nvidia.com/gpu"
+  - filter TaintToleration rejected nodes: node(s) had untolerated taint(s)
 ```
+
+For each workload the report shows how much of every requested resource the
+cluster has (`ALLOCATABLE`), how much is already in use (`ALLOCATED`), how much
+the workload wants (`REQUESTED`, each as a percentage of allocatable), and a
+per-resource `STATUS` — `OK`, `INSUFFICIENT` (present but not enough), or
+`NOT PRESENT` (no node advertises it). It also reports how many nodes a single
+replica passes all filters on (`Feasible nodes`), the fit verdict
+(`SCHEDULABLE` / `PARTIAL` / `NOT SCHEDULABLE`), and the reasons anything did not
+fit. Status and verdict are color-coded (pastel green/amber/red) on a terminal.
 
 ## How it works
 
@@ -137,6 +148,11 @@ pods; it only evaluates filters against a temporary in-memory snapshot.
   guarantee that dynamic provisioning will succeed at bind time.
 - Pods are evaluated as if they use the **default scheduler**, regardless of
   `spec.schedulerName`.
+- **Resource names are validated** like the Kubernetes API validates container
+  resources: an unqualified name must be standard (`cpu`, `memory`,
+  `ephemeral-storage`, `hugepages-*`), otherwise it must be fully qualified (e.g.
+  `nvidia.com/gpu`). An unqualified custom name such as `gpu` is rejected, because
+  the scheduler would silently ignore it and wrongly report a fit.
 - The scheduler libraries are pinned to a specific Kubernetes version
   (see `go.mod`); default plugins/feature-gates match that version.
 

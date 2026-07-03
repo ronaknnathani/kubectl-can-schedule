@@ -75,18 +75,19 @@ func decodeDocuments(data []byte, source, defaultNS string) ([]*Workload, error)
 }
 
 func workloadFromObject(obj runtime.Object, defaultNS string) (*Workload, error) {
+	var w *Workload
 	switch o := obj.(type) {
 	case *corev1.Pod:
 		ns := namespaceOr(o.Namespace, defaultNS)
-		name := nameOr(o.Name, o.GenerateName, "pod")
 		base := o.DeepCopy()
 		base.Namespace = ns
-		return &Workload{
-			Name:      name,
+		w = &Workload{
+			Kind:      "Pod",
+			Name:      nameOr(o.Name, o.GenerateName, "pod"),
 			Namespace: ns,
 			Replicas:  1,
 			base:      base,
-		}, nil
+		}
 	case *appsv1.Deployment:
 		ns := namespaceOr(o.Namespace, defaultNS)
 		name := nameOr(o.Name, o.GenerateName, "deployment")
@@ -94,12 +95,13 @@ func workloadFromObject(obj runtime.Object, defaultNS string) (*Workload, error)
 		if err != nil {
 			return nil, fmt.Errorf("Deployment %s: %w", name, err)
 		}
-		return &Workload{
+		w = &Workload{
+			Kind:      "Deployment",
 			Name:      name,
 			Namespace: ns,
 			Replicas:  replicas,
 			base:      podFromTemplate(o.Spec.Template, ns),
-		}, nil
+		}
 	case *appsv1.StatefulSet:
 		ns := namespaceOr(o.Namespace, defaultNS)
 		name := nameOr(o.Name, o.GenerateName, "statefulset")
@@ -107,16 +109,22 @@ func workloadFromObject(obj runtime.Object, defaultNS string) (*Workload, error)
 		if err != nil {
 			return nil, fmt.Errorf("StatefulSet %s: %w", name, err)
 		}
-		return &Workload{
+		w = &Workload{
+			Kind:                 "StatefulSet",
 			Name:                 name,
 			Namespace:            ns,
 			Replicas:             replicas,
 			base:                 podFromTemplate(o.Spec.Template, ns),
 			volumeClaimTemplates: o.Spec.VolumeClaimTemplates,
-		}, nil
+		}
 	default:
 		return nil, fmt.Errorf("unsupported kind %T (only Pod, Deployment, StatefulSet are supported)", obj)
 	}
+
+	if err := validatePodResourceNames(w.base); err != nil {
+		return nil, fmt.Errorf("%s %s: %w", w.Kind, w.Name, err)
+	}
+	return w, nil
 }
 
 func podFromTemplate(tmpl corev1.PodTemplateSpec, ns string) *corev1.Pod {
