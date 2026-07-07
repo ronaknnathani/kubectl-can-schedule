@@ -10,6 +10,13 @@ import (
 	"github.com/ronaknnathani/kubectl-can-schedule/pkg/cli"
 )
 
+// Populated at build time via -ldflags by GoReleaser.
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
+)
+
 func main() {
-	os.Exit(cli.Execute())
+	os.Exit(cli.Execute(cli.BuildInfo{Version: version, Commit: commit, Date: date}))
 }

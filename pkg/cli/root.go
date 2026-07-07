@@ -52,10 +52,18 @@ type options struct {
 	exitCode int
 }
 
+// BuildInfo carries version metadata injected at build time.
+type BuildInfo struct {
+	Version string
+	Commit  string
+	Date    string
+}
+
 // Execute runs the command and returns the process exit code.
-func Execute() int {
+func Execute(build BuildInfo) int {
 	o := &options{replicas: 1}
 	cmd := newCommand(o)
+	cmd.Version = fmt.Sprintf("%s (commit: %s, date: %s)", build.Version, build.Commit, build.Date)
 	if err := cmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 2

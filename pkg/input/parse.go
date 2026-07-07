@@ -93,7 +93,7 @@ func workloadFromObject(obj runtime.Object, defaultNS string) (*Workload, error)
 		name := nameOr(o.Name, o.GenerateName, "deployment")
 		replicas, err := replicasOf(o.Spec.Replicas)
 		if err != nil {
-			return nil, fmt.Errorf("Deployment %s: %w", name, err)
+			return nil, fmt.Errorf("invalid Deployment %s: %w", name, err)
 		}
 		w = &Workload{
 			Kind:      "Deployment",
@@ -107,7 +107,7 @@ func workloadFromObject(obj runtime.Object, defaultNS string) (*Workload, error)
 		name := nameOr(o.Name, o.GenerateName, "statefulset")
 		replicas, err := replicasOf(o.Spec.Replicas)
 		if err != nil {
-			return nil, fmt.Errorf("StatefulSet %s: %w", name, err)
+			return nil, fmt.Errorf("invalid StatefulSet %s: %w", name, err)
 		}
 		w = &Workload{
 			Kind:                 "StatefulSet",

@@ -11,7 +11,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
 )
 
@@ -40,7 +39,7 @@ func (w *Workload) Replica(ordinal int) (*corev1.Pod, []*corev1.PersistentVolume
 	pod := w.base.DeepCopy()
 	pod.Namespace = w.Namespace
 	pod.Name = fmt.Sprintf("%s-%d", w.Name, ordinal)
-	pod.UID = types.UID(uuid.NewUUID())
+	pod.UID = uuid.NewUUID()
 	pod.Spec.NodeName = ""
 	// We always evaluate against the default scheduler profile.
 	pod.Spec.SchedulerName = ""

@@ -301,13 +301,13 @@ func formatQuantity(q resource.Quantity) string {
 	return trimDecimalZeros(q.AsDec().String())
 }
 
-func humanBinary(bytes int64) string {
+func humanBinary(n int64) string {
 	const unit = 1024
-	if bytes < unit {
-		return strconv.FormatInt(bytes, 10)
+	if n < unit {
+		return strconv.FormatInt(n, 10)
 	}
 	units := []string{"Ki", "Mi", "Gi", "Ti", "Pi", "Ei"}
-	value := float64(bytes)
+	value := float64(n)
 	i := -1
 	for value >= unit && i < len(units)-1 {
 		value /= unit

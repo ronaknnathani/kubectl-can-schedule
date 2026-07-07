@@ -249,7 +249,7 @@ func (s *Simulator) runWorkload(w *input.Workload, allocated corev1.ResourceList
 // feasibility runs PreFilter once then Filter on every node for a single pod,
 // returning how many nodes pass and an example message per non-resource filter
 // plugin that rejected nodes. It places nothing.
-func (s *Simulator) feasibility(pod *corev1.Pod) (int, map[string]string, error) {
+func (s *Simulator) feasibility(pod *corev1.Pod) (feasibleNodes int, filterReasons map[string]string, err error) {
 	if err := s.resolvePriority(pod); err != nil {
 		return 0, nil, err
 	}
@@ -518,13 +518,12 @@ const (
 
 // listPriorityClasses returns a name->value map of cluster PriorityClasses and
 // the global-default priority value (0 when no class is marked globalDefault).
-func listPriorityClasses(ctx context.Context, client clientset.Interface) (map[string]int32, int32, error) {
+func listPriorityClasses(ctx context.Context, client clientset.Interface) (priorities map[string]int32, defaultPriority int32, err error) {
 	list, err := client.SchedulingV1().PriorityClasses().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, 0, fmt.Errorf("listing priorityclasses: %w", err)
 	}
-	priorities := make(map[string]int32, len(list.Items))
-	var defaultPriority int32
+	priorities = make(map[string]int32, len(list.Items))
 	for i := range list.Items {
 		pc := &list.Items[i]
 		priorities[pc.Name] = pc.Value

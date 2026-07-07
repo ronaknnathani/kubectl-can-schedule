@@ -279,13 +279,13 @@ spec:
 `
 	}
 
-	// Only node-a is labelled ssd: 1 feasible node, schedulable.
+	// Only node-a is labeled ssd: 1 feasible node, schedulable.
 	fits := only(t, runSim(t, objs, Options{}, parseManifest(t, manifest("ssd"))))
 	if !fits.Schedulable() || fits.FeasibleNodes != 1 {
 		t.Fatalf("ssd: schedulable=%v feasible=%d, want true/1", fits.Schedulable(), fits.FeasibleNodes)
 	}
 
-	// No node is labelled nvme: 0 feasible, not schedulable, filter reason recorded.
+	// No node is labeled nvme: 0 feasible, not schedulable, filter reason recorded.
 	none := only(t, runSim(t, objs, Options{}, parseManifest(t, manifest("nvme"))))
 	if none.Schedulable() || none.FeasibleNodes != 0 {
 		t.Fatalf("nvme: schedulable=%v feasible=%d, want false/0", none.Schedulable(), none.FeasibleNodes)
