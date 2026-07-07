@@ -1,7 +1,7 @@
 /bin/
 /dist/
 /.tools/
-kubectl-can_schedule
+/kubectl-can_schedule
 *.test
 *.out
 coverage.out
