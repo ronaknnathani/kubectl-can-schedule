@@ -6,33 +6,15 @@ the cluster right now, and if not, why?**
 It runs the **default scheduler's filter plugins** (the same PreFilter + Filter
 logic the real kube-scheduler uses) against a live snapshot of the cluster. It is
 not a scorer or an optimizer — it does not try to find the *best* node, it only
-reports whether the requested replicas fit.
+reports whether the requested workloads fit.
 
-```
-$ kubectl can-schedule -f frontend.yaml -f cache.yaml -f trainer.yaml
+Check ad-hoc resource requests with flags:
 
-Cluster: 4 node(s)
+![Flag-based request that partially fits](docs/images/example-flags-partial.png)
 
-Cluster capacity:
-╭────────────────┬─────────────┬────────────╮
-│    RESOURCE    │ ALLOCATABLE │ ALLOCATED  │
-├────────────────┼─────────────┼────────────┤
-│ cpu            │ 72          │ 1.25 (2%)  │
-│ memory         │ 30.99Gi     │ 440Mi (1%) │
-│ nvidia.com/gpu │ 0           │ 0          │
-╰────────────────┴─────────────┴────────────╯
+Or check one or more manifests (Pods, Deployments, StatefulSets):
 
-Workloads:
-╭─────────────┬──────────┬────────────────┬────────┬────────────┬────────────────┬──────────────┬────────────────────────╮
-│    KIND     │   NAME   │ FEASIBLE NODES │  cpu   │   memory   │ nvidia.com/gpu │ REPLICAS FIT │         REASON         │
-├─────────────┼──────────┼────────────────┼────────┼────────────┼────────────────┼──────────────┼────────────────────────┤
-│ Deployment  │ frontend │ 3/4            │ 2 (3%) │ 512Mi (2%) │ -              │ 2/2          │ -                      │
-│ StatefulSet │ cache    │ 3/4            │ 2 (3%) │ 1Gi (3%)   │ -              │ 2/2          │ -                      │
-│ Pod         │ trainer  │ 0/4            │ 2 (3%) │ -          │ 2              │ 0/1          │ missing nvidia.com/gpu │
-╰─────────────┴──────────┴────────────────┴────────┴────────────┴────────────────┴──────────────┴────────────────────────╯
-
-Overall: NOT SCHEDULABLE — at least one workload does not fit.
-```
+![Multi-object manifest where one workload does not fit](docs/images/example-manifest-multi-object.png)
 
 The **cluster capacity** table (shown once) reports, per requested resource,
 total `ALLOCATABLE` and how much is already `ALLOCATED` with its percentage. The
@@ -120,7 +102,7 @@ kubectl can-schedule \
 | `-n, --namespace` | Namespace for manifests/pods that don't specify one. |
 
 The output reports total cluster allocatable capacity, the total requested by the
-workload, whether the requested replicas fit, and — when they don't — the filter
+workload, whether the requested workloads fit, and — when they don't — the filter
 plugins that rejected them. The exit code is the machine-readable signal (see
 below).
 
