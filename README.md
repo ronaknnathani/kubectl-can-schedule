@@ -46,16 +46,41 @@ red does not fit or is absent. A single `Overall` verdict closes the report.
 Resource fitting uses **requests**, and the scheduler's native resource
 accounting (init containers, native sidecars, pod overhead) is honored.
 
-## Install
+## Installation
+
+### Install script
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ronaknnathani/kubectl-can-schedule/main/install.sh | sh
+```
+
+By default, the script installs to `/usr/local/bin` when writable, otherwise `~/.local/bin`. Override with `INSTALL_DIR=/path/to/bin`.
+
+### krew
+
+```bash
+kubectl krew install --manifest=plugins/can-schedule.yaml
+```
+
+### GitHub releases
+
+Download the latest archive for your platform from the [releases page](https://github.com/ronaknnathani/kubectl-can-schedule/releases), then place the `kubectl-can_schedule` binary on your `PATH`.
+
+### Source
+
+```bash
+git clone https://github.com/ronaknnathani/kubectl-can-schedule.git
+cd kubectl-can-schedule
+make build
+make install
+```
+
+Requires Go 1.26+.
 
 The kubectl plugin mechanism turns a `kubectl-can_schedule` binary on your `PATH`
-into the `kubectl can-schedule` subcommand (the `_` becomes `-`).
+into the `kubectl can-schedule` subcommand (the `_` becomes `-`). Verify with:
 
-```
-make install                 # builds to $(go env GOPATH)/bin/kubectl-can_schedule
-# or:
-go build -o ~/bin/kubectl-can_schedule ./cmd/kubectl-can_schedule
-
+```bash
 kubectl can-schedule --help
 kubectl plugin list | grep can-schedule
 ```
@@ -89,19 +114,9 @@ kubectl can-schedule \
   --replicas 16
 ```
 
-### Flags
-
-| Flag | Description |
-|------|-------------|
-| `-f, --filename` | Manifest file(s); repeatable; `-` for stdin. |
-| `--resource <name>=<qty>` | Per-replica request; repeatable. Mutually exclusive with `-f`. |
-| `--replicas` | Replica count for flag-based input (invalid with `-f`). |
-| `--consider-preemption` | Also consider evicting lower-priority pods (see below). |
-| `--kubeconfig` | Path to the kubeconfig file (defaults to the standard loading rules). |
-| `--context` | Kubeconfig context to use (defaults to the current context). |
-| `-n, --namespace` | Namespace for manifests/pods that don't specify one. |
-
-The output reports total cluster allocatable capacity, the total requested by the
+Standard kubectl connection flags are supported (`--kubeconfig`, `--context`,
+`-n/--namespace`); run `kubectl can-schedule --help` for the full list. The
+output reports total cluster allocatable capacity, the total requested by the
 workload, whether the requested workloads fit, and — when they don't — the filter
 plugins that rejected them. The exit code is the machine-readable signal (see
 below).
@@ -147,10 +162,6 @@ pods; it only evaluates filters against a temporary in-memory snapshot.
 - The scheduler libraries are pinned to a specific Kubernetes version
   (see `go.mod`); default plugins/feature-gates match that version.
 
-## Development
+## License
 
-```
-make build   # build ./bin/kubectl-can_schedule
-make test    # go test ./...
-make vet
-```
+MIT. See [LICENSE](LICENSE).
