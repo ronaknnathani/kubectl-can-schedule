@@ -7,6 +7,10 @@ package main
 import (
 	"os"
 
+	// Register client-go auth plugins so cloud-provider kubeconfigs
+	// (GKE, EKS, AKS, OIDC, ...) authenticate correctly.
+	_ "k8s.io/client-go/plugin/pkg/client/auth"
+
 	"github.com/ronaknnathani/kubectl-can-schedule/pkg/cli"
 )
 
