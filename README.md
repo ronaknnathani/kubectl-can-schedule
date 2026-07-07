@@ -58,9 +58,15 @@ By default, the script installs to `/usr/local/bin` when writable, otherwise `~/
 
 ### krew
 
+Once the plugin is available in the [krew index](https://krew.sigs.k8s.io):
+
 ```bash
-kubectl krew install --manifest=plugins/can-schedule.yaml
+kubectl krew install can-schedule
 ```
+
+New releases are published to the krew index automatically by
+[krew-release-bot](https://github.com/rajatjindal/krew-release-bot) via the
+`.krew.yaml` template at the repository root.
 
 ### GitHub releases
 

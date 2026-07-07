@@ -34,3 +34,11 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Opens a PR against krew-index to bump the published version. This is a
+      # no-op until the plugin has been accepted into krew-index for the first
+      # time (that initial submission is manual), so failures here must not fail
+      # the release.
+      - name: Update new version in krew-index
+        continue-on-error: true
+        uses: rajatjindal/krew-release-bot@v0.0.51

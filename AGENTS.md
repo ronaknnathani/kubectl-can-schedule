@@ -77,19 +77,21 @@ Note: the module depends on `k8s.io/kubernetes`, so a cold `make ci` (which runs
 
 - Tags are annotated semver tags (`vX.Y.Z`) and trigger the Release workflow.
 - The Release workflow runs the tests, then GoReleaser publishes cross-platform
-  archives and `checksums.txt`. The archive is named after the project
-  (`kubectl-can-schedule_<version>_<os>_<arch>`) with the `kubectl-can_schedule`
-  binary inside.
+  archives and `checksums.txt`. The archive is named after the project and tag
+  (`kubectl-can-schedule_<vTag>_<os>_<arch>`) with the `kubectl-can_schedule`
+  binary inside. The archive tag matches the git tag verbatim (with the leading
+  `v`) so `krew-release-bot` can resolve asset URLs.
 - `install.sh` downloads the latest release archive and installs the binary onto
   the user's `PATH`.
-- After a release, update `plugins/can-schedule.yaml` with the new version, asset
-  URLs, and SHA256 checksums from the release `checksums.txt` before krew
-  distribution.
+- krew distribution is driven by the `.krew.yaml` template at the repo root.
+  After GoReleaser publishes, the Release workflow runs `krew-release-bot`, which
+  opens a PR to `krew-index` to bump the version. The very first submission to
+  `krew-index` is manual; the bot only automates subsequent updates.
 
 ## krew best-practices checklist
 
-Before submitting or updating the krew manifest (`plugins/can-schedule.yaml`),
-confirm the plugin follows the krew developer best practices:
+Before updating the krew template (`.krew.yaml`), confirm the plugin follows the
+krew developer best practices:
 
 - Help and usage text show the kubectl form (`kubectl can-schedule`), not just
   the binary name.
@@ -99,12 +101,14 @@ confirm the plugin follows the krew developer best practices:
   so cloud-provider kubeconfigs work.
 - Keep manifest `metadata.name` as the plugin name without the `kubectl-` prefix
   (`can-schedule`).
-- Manifest URLs must point to immutable versioned release artifacts, never
-  `latest`.
-- Every manifest platform entry must include the SHA256 from the release
-  `checksums.txt`, and the `bin` must match the binary in the archive
-  (`kubectl-can_schedule`, or `kubectl-can_schedule.exe` on Windows).
+- Use `{{ .TagName }}` for the version and `addURIAndSha` for each platform so
+  URLs point to immutable versioned artifacts and SHA256 sums are filled in
+  automatically at release time.
+- The `bin` must match the binary in the archive (`kubectl-can_schedule`, or
+  `kubectl-can_schedule.exe` on Windows).
 - Keep `caveats` accurate about required RBAC; this plugin needs read/list access
   to nodes, pods, priorityclasses, and storageclasses, and performs no writes.
-- Validate the manifest YAML parses, all asset URLs return HTTP 200, and manifest
-  checksums match the release before distributing.
+- Render the template before tagging a release to confirm it parses, for example:
+  `docker run -v "$PWD/.krew.yaml:/tmp/template-file.yaml"
+  ghcr.io/rajatjindal/krew-release-bot:v0.0.51 krew-release-bot template
+  --tag <tag> --template-file /tmp/template-file.yaml`.
