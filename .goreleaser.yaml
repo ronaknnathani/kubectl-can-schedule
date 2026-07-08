@@ -50,4 +50,4 @@ release:
     name: kubectl-can-schedule
   draft: false
   prerelease: auto
-  name_template: "{{.ProjectName}} v{{.Version}}"
+  name_template: "{{ .Tag }}"
