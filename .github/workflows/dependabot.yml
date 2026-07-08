@@ -1,0 +1,70 @@
+name: Dependabot
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    if: ${{ github.actor == 'dependabot[bot]' }}
+    steps:
+      - name: Wait for CI checks
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          required_checks="Test Lint Build"
+          deadline=$((SECONDS + 1800))
+
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            all_passed=true
+
+            for check in $required_checks; do
+              result="$(gh api "repos/$REPO/commits/$PR_HEAD_SHA/check-runs" \
+                --jq ".check_runs[] | select(.name == \"$check\") | [.status, .conclusion] | @tsv" | tail -n 1)"
+
+              if [ -z "$result" ]; then
+                echo "Waiting for $check to start..."
+                all_passed=false
+                continue
+              fi
+
+              status="$(printf '%s' "$result" | cut -f1)"
+              conclusion="$(printf '%s' "$result" | cut -f2)"
+
+              if [ "$status" != "completed" ]; then
+                echo "Waiting for $check to complete..."
+                all_passed=false
+                continue
+              fi
+
+              if [ "$conclusion" != "success" ]; then
+                echo "$check finished with conclusion: $conclusion"
+                exit 1
+              fi
+
+              echo "$check passed."
+            done
+
+            if [ "$all_passed" = true ]; then
+              exit 0
+            fi
+
+            sleep 20
+          done
+
+          echo "Timed out waiting for CI checks."
+          exit 1
+
+      - name: Merge Dependabot PR
+        run: gh pr merge --merge --delete-branch "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
