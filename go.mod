@@ -3,7 +3,7 @@ module github.com/ronaknnathani/kubectl-can-schedule
 go 1.26.0
 
 require (
-	github.com/olekukonko/tablewriter v1.1.4
+	github.com/olekukonko/tablewriter v1.1.5
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/term v0.46.0
 	k8s.io/api v0.36.2
